@@ -11,7 +11,7 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, an
 | Phase | State |
 |---|---|
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
-| Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned with `psxvc`, no jPSXdec comparison yet; results in `docs/target-games.md` |
+| Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned and compared with jPSXdec; results and open issues in `docs/target-games.md` |
 | 2. Decode MVP | Next |
 | 3–6 | Not started |
 
@@ -51,7 +51,7 @@ Key external crates: `clap`, `rsmpeg` (or `ffmpeg-next`) for libav, `bitstream-i
 ## Target games: Parasite Eve, Parasite Eve II, Koudelka
 
 These three are the first acceptance targets, and phase priority follows them.
-- **Step 0 (before writing decoders):** run jPSXdec's indexer (`jpsxdec -f disc.cue -x disc.idx`) on every disc of all three games: PE1 ×2, PE2 ×2, Koudelka ×4. The `.idx` lists the exact video variant, dimensions, sectors/frame and audio format of each stream, so we confirm the formats instead of guessing. Save these index summaries (metadata only, no game data) as `docs/target-games.md`.
+- **Step 0 (before writing decoders):** run jPSXdec's indexer (`jpsxdec -f disc.bin -x disc.idx`) on every disc of all three games: PE1 ×2, PE2 ×2, Koudelka ×4. The `.idx` lists the exact video variant, dimensions, sectors/frame and audio format of each stream, so we confirm the formats instead of guessing. Save these index summaries (metadata only, no game data) as `docs/target-games.md`.
 - I expect all three to use Sony's standard STR (v2/v3) video with XA audio, but that's unconfirmed until Step 0. If any title turns out to use a custom variant, that variant moves into phase 1.
 - Multi-disc handling: an index per disc, and output names like `PE2-D1-<file>-<stream>.mkv`.
 - These discs also serve as the gated real-disc regression set: the decode must match jPSXdec on every stream across all 8 discs.
@@ -96,7 +96,7 @@ Development and testing both happen on the owner's Windows machine, with the rea
 - **Real discs:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `psxvc scan` summaries plus jPSXdec `.idx` files serve the same purpose.
 - **Debugging clips:** `psxvc extract-sectors` cuts one stream (a few MB) into a small BIN/CUE. These contain game data, so never commit them. Keep them out of `tests/fixtures/`, where `.gitignore` allows `.bin` and `.cue` files.
 
-**Tool status:** Rust, Java 21 and FFmpeg 9 are installed. jPSXdec and psxavenc still need installing. `clang` and `pkg-config` are also missing, which matters if Phase 3 uses `rsmpeg` bindings.
+**Tool status:** Rust, Java 21 and FFmpeg 9 are installed. jPSXdec is a sibling checkout at `../jpsxdec`, with a built jar at `jpsxdec/_ant/release/jpsxdec.jar`. psxavenc still needs installing. `clang` and `pkg-config` are also missing, which matters if Phase 3 uses `rsmpeg` bindings.
 
 ## Verification
 

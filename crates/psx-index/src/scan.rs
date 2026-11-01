@@ -10,8 +10,9 @@ use std::ops::Range;
 
 /// Max sectors between two sectors of the same video stream.
 const VIDEO_MAX_GAP: u32 = 300;
-/// Max sectors between two sectors of the same audio stream.
-const AUDIO_MAX_GAP: u32 = 128;
+/// An audio stream is only split at a video's start if it runs at least this
+/// many sectors past it on both sides.
+const AUDIO_SPLIT_MARGIN: u32 = 32;
 const READ_CHUNK: u32 = 1024;
 const MAX_REPORTED_EDC_ERRORS: usize = 32;
 
@@ -40,7 +41,43 @@ struct OpenAudio {
     first_lba: u32,
     last_lba: u32,
     sectors: u32,
-    strides: HashMap<u32, u32>,
+    /// Gap between audio sectors, set by the second sector.
+    stride: Option<u32>,
+}
+
+impl OpenAudio {
+    fn continues_at(&self, lba: u32, format: XaFormat) -> bool {
+        let gap = lba - self.last_lba;
+        self.format == format
+            && match self.stride {
+                Some(stride) => gap == stride,
+                None => gap == 1 || format.disc_speed(gap).is_some(),
+            }
+    }
+
+    /// Split at each video start this stream crosses.
+    fn split_at_video_starts(self, video_starts: &[u32]) -> Vec<OpenAudio> {
+        let mut parts = Vec::new();
+        let mut rest = self;
+        for &start in video_starts {
+            let crosses = rest.first_lba + AUDIO_SPLIT_MARGIN < start
+                && rest.last_lba >= start + AUDIO_SPLIT_MARGIN;
+            let Some(stride) = rest.stride.filter(|_| crosses) else {
+                continue;
+            };
+            let first_end = rest.first_lba + (start - 1 - rest.first_lba) / stride * stride;
+            let second_start = first_end + stride;
+            parts.push(OpenAudio {
+                last_lba: first_end,
+                sectors: (first_end - rest.first_lba) / stride + 1,
+                ..rest
+            });
+            rest.first_lba = second_start;
+            rest.sectors = (rest.last_lba - second_start) / stride + 1;
+        }
+        parts.push(rest);
+        parts
+    }
 }
 
 #[derive(Default)]
@@ -155,20 +192,14 @@ impl Scanner {
         format: XaFormat,
         eof: bool,
     ) {
-        let (stale, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open_audio)
-            .into_iter()
-            .partition(|a| lba - a.last_lba > AUDIO_MAX_GAP);
-        self.done_audio.extend(stale);
-        self.open_audio = open;
-
         let pos = self
             .open_audio
             .iter()
             .position(|a| a.file == file && a.xa_file == xa_file && a.xa_channel == xa_channel);
         let i = match pos {
-            Some(i) if self.open_audio[i].format == format => {
+            Some(i) if self.open_audio[i].continues_at(lba, format) => {
                 let a = &mut self.open_audio[i];
-                *a.strides.entry(lba - a.last_lba).or_default() += 1;
+                a.stride = Some(lba - a.last_lba);
                 a.last_lba = lba;
                 a.sectors += 1;
                 i
@@ -186,7 +217,7 @@ impl Scanner {
                     first_lba: lba,
                     last_lba: lba,
                     sectors: 1,
-                    strides: HashMap::new(),
+                    stride: None,
                 });
                 self.open_audio.len() - 1
             }
@@ -202,32 +233,33 @@ impl Scanner {
         self.done_audio.append(&mut self.open_audio);
         let name = |f: Option<usize>| f.map(|i| self.files[i].path.clone());
 
-        let mut audio_src: Vec<OpenAudio> = std::mem::take(&mut self.done_audio);
+        let mut video_src = std::mem::take(&mut self.done_video);
+        video_src.sort_by_key(|v| v.frames[0].first_lba);
+        let video_starts: Vec<u32> = video_src.iter().map(|v| v.frames[0].first_lba).collect();
+
+        let mut audio_src: Vec<OpenAudio> = std::mem::take(&mut self.done_audio)
+            .into_iter()
+            .flat_map(|a| a.split_at_video_starts(&video_starts))
+            .collect();
         audio_src.sort_by_key(|a| (a.first_lba, a.xa_channel));
         let audio: Vec<AudioStream> = audio_src
             .into_iter()
             .enumerate()
-            .map(|(id, a)| {
-                let stride = most_common(&a.strides);
-                AudioStream {
-                    id,
-                    file: name(a.file),
-                    xa_file: a.xa_file,
-                    xa_channel: a.xa_channel,
-                    first_lba: a.first_lba,
-                    last_lba: a.last_lba,
-                    sector_count: a.sectors,
-                    format: a.format,
-                    stride,
-                    duration_secs: a.sectors as f64
-                        * a.format.samples_per_channel_per_sector() as f64
-                        / a.format.sample_rate as f64,
-                }
+            .map(|(id, a)| AudioStream {
+                id,
+                file: name(a.file),
+                xa_file: a.xa_file,
+                xa_channel: a.xa_channel,
+                first_lba: a.first_lba,
+                last_lba: a.last_lba,
+                sector_count: a.sectors,
+                format: a.format,
+                stride: a.stride,
+                duration_secs: a.sectors as f64 * a.format.samples_per_channel_per_sector() as f64
+                    / a.format.sample_rate as f64,
             })
             .collect();
 
-        let mut video_src = std::mem::take(&mut self.done_video);
-        video_src.sort_by_key(|v| v.frames[0].first_lba);
         let video = video_src
             .into_iter()
             .enumerate()
@@ -295,21 +327,10 @@ fn overlap(a0: u32, a1: u32, b0: u32, b1: u32) -> u32 {
     (a1.min(b1) + 1).saturating_sub(a0.max(b0))
 }
 
-fn most_common(h: &HashMap<u32, u32>) -> Option<u32> {
-    h.iter()
-        .max_by_key(|(k, v)| (**v, std::cmp::Reverse(**k)))
-        .map(|(k, _)| *k)
-}
-
 fn timing<'a>(frames: &[FrameInfo], audio: impl Iterator<Item = &'a AudioStream>) -> Timing {
     // Infer disc speed from the first interleaved audio stream with a stride.
-    let inferred = audio.filter_map(|a| {
-        let sps = a.format.implied_sectors_per_second(a.stride?);
-        [75u32, 150]
-            .into_iter()
-            .find(|&std| (sps - std as f64).abs() / (std as f64) < 0.02)
-    });
-    let (sps, source) = match inferred.into_iter().next() {
+    let mut inferred = audio.filter_map(|a| a.format.disc_speed(a.stride?));
+    let (sps, source) = match inferred.next() {
         Some(s) => (s, "audio"),
         None => (150, "assumed"),
     };
@@ -462,6 +483,52 @@ mod tests {
         assert_eq!(v.frame_count, 7);
         assert_eq!(v.incomplete_frames, 0);
         assert!(v.frames.windows(2).all(|w| w[1].number == w[0].number + 1));
+    }
+
+    #[test]
+    fn stride_change_starts_new_audio_stream() {
+        let mut disc = tiny_disc(80);
+        for lba in [30, 38, 46, 60, 68] {
+            disc.sectors[lba as usize] = audio_sector(lba, false);
+        }
+        let idx = scan(
+            &mut disc,
+            &ScanOptions {
+                range: None,
+                source_name: "t".into(),
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        let ranges: Vec<_> = idx
+            .audio
+            .iter()
+            .map(|a| (a.first_lba, a.last_lba))
+            .collect();
+        assert_eq!(ranges, vec![(30, 46), (60, 68)]);
+        assert_eq!(idx.audio[0].sector_count, 3);
+        assert_eq!(idx.audio[0].stride, Some(8));
+    }
+
+    #[test]
+    fn audio_splits_at_video_starts_it_crosses() {
+        let audio = OpenAudio {
+            file: None,
+            xa_file: 1,
+            xa_channel: 1,
+            format: XaFormat::from_coding_info(0x01).unwrap(),
+            first_lba: 107,
+            last_lba: 507,
+            sectors: 51,
+            stride: Some(8),
+        };
+        // 100 and 490 are too close to the ends to split at.
+        let parts = audio.split_at_video_starts(&[100, 300, 490]);
+        let got: Vec<_> = parts
+            .iter()
+            .map(|a| (a.first_lba, a.last_lba, a.sectors))
+            .collect();
+        assert_eq!(got, vec![(107, 299, 25), (307, 507, 26)]);
     }
 
     #[test]

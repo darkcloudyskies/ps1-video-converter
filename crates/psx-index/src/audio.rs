@@ -52,6 +52,15 @@ impl XaFormat {
     pub fn implied_sectors_per_second(&self, stride: u32) -> f64 {
         stride as f64 * self.sample_rate as f64 / self.samples_per_channel_per_sector() as f64
     }
+
+    /// The standard disc speed (75 or 150 sectors per second) this format
+    /// plays at with this `stride`, if any.
+    pub fn disc_speed(&self, stride: u32) -> Option<u32> {
+        let sps = self.implied_sectors_per_second(stride);
+        [75u32, 150]
+            .into_iter()
+            .find(|&std| (sps - std as f64).abs() / (std as f64) < 0.02)
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +76,9 @@ mod tests {
         );
         assert_eq!(f.samples_per_channel_per_sector(), 2016);
         assert!((f.implied_sectors_per_second(8) - 150.0).abs() < 1e-9);
+        assert_eq!(f.disc_speed(8), Some(150));
+        assert_eq!(f.disc_speed(4), Some(75));
+        assert_eq!(f.disc_speed(66), None);
     }
 
     #[test]
