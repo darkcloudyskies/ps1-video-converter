@@ -11,7 +11,7 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, an
 | Phase | State |
 |---|---|
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
-| Step 0: confirm target-game formats | **Waiting on real-disc scans**: results go in `docs/target-games.md` |
+| Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned with `psxvc`, no jPSXdec comparison yet; results in `docs/target-games.md` |
 | 2. Decode MVP | Next |
 | 3–6 | Not started |
 
@@ -85,16 +85,18 @@ psxvc frame game.cue --stream 3 --frame 120 -o f.png   # quick visual check
 5. **GUI**: Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue.
 6. **Optional filters**: deblock, deband, and upscaling hooks (e.g. external model via ffmpeg filter).
 
-## Where development and testing happen (hybrid, agreed)
+## Where development and testing happen (local)
 
-- **Cloud session (here):** write the code and run CI-style tests on test files that are legal to commit:
+Development and testing both happen on the owner's Windows machine, with the real discs in `discs/` (ignored by git). GitHub CI still runs fmt, clippy and the tests that need no game data.
+
+- **Tests that can be committed:** test files that are legal to commit:
   - Build test streams with **psxavenc**, the open-source PS1 STR/XA encoder from PSn00bSDK, from frames and audio we create, e.g. ffmpeg `testsrc`, colour bars and gradients. Gradients are good at exposing banding and chroma problems. Because we know the source picture, we can measure quality (PSNR/SSIM), not only check that output matches.
-  - Run **jPSXdec** (Java) in the container as the reference decoder for the same test files.
+  - Run **jPSXdec** (Java) as the reference decoder for the same test files.
   - Wrap the generated streams in a minimal BIN/CUE so the full disc → export pipeline gets tested.
-- **The owner's machine:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report to paste back into the development session. Until `verify` exists, `psxvc scan` summaries plus jPSXdec `.idx` files serve the same purpose.
-- **Optional, during development:**
-  - Small sector excerpts cut from the real BINs with `psxvc extract-sectors` (implemented), one stream (a few MB) each, uploaded here only for debugging and never committed.
-  - Or connect a cloud session to a folder on the owner's computer through Claude Code Remote Control, so real-disc tests can run directly.
+- **Real discs:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `psxvc scan` summaries plus jPSXdec `.idx` files serve the same purpose.
+- **Debugging clips:** `psxvc extract-sectors` cuts one stream (a few MB) into a small BIN/CUE. These contain game data, so never commit them. Keep them out of `tests/fixtures/`, where `.gitignore` allows `.bin` and `.cue` files.
+
+**Tool status:** Rust, Java 21 and FFmpeg 9 are installed. jPSXdec and psxavenc still need installing. `clang` and `pkg-config` are also missing, which matters if Phase 3 uses `rsmpeg` bindings.
 
 ## Verification
 
