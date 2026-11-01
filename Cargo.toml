@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/psx-disc",
+    "crates/psx-export",
     "crates/psx-index",
     "crates/psx-mdec",
     "crates/psx-stream",
@@ -16,6 +17,7 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 psx-disc = { path = "crates/psx-disc" }
+psx-export = { path = "crates/psx-export" }
 psx-index = { path = "crates/psx-index" }
 psx-mdec = { path = "crates/psx-mdec" }
 psx-stream = { path = "crates/psx-stream" }

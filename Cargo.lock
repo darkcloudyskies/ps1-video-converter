@@ -284,6 +284,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-export"
+version = "0.1.0"
+dependencies = [
+ "psx-disc",
+ "psx-index",
+ "psx-mdec",
+ "psx-stream",
+ "psx-xa",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "psx-index"
 version = "0.1.0"
 dependencies = [
@@ -320,6 +333,7 @@ dependencies = [
  "clap",
  "png",
  "psx-disc",
+ "psx-export",
  "psx-index",
  "psx-mdec",
  "psx-stream",

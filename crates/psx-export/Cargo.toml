@@ -1,0 +1,17 @@
+[package]
+name = "psx-export"
+description = "Encodes PS1 video and audio by piping a NUT stream to an ffmpeg process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+psx-disc.workspace = true
+psx-index.workspace = true
+psx-mdec.workspace = true
+psx-stream.workspace = true
+psx-xa.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

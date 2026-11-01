@@ -198,6 +198,71 @@ fn frame_and_audio_export() {
 }
 
 #[test]
+fn export_writes_a_file_and_names_it_after_the_stream() {
+    let have_ffmpeg = Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !have_ffmpeg {
+        eprintln!("skipping: ffmpeg isn't on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = write_decodable_disc(dir.path(), 2);
+    let bin_s = bin.to_str().unwrap();
+    psxvc(&["scan", "--quiet", bin_s]);
+
+    let named = dir.path().join("named.mkv");
+    let out = psxvc(&[
+        "export",
+        bin_s,
+        "--stream",
+        "0",
+        "--quiet",
+        "-o",
+        named.to_str().unwrap(),
+    ]);
+    assert!(out.contains("1 of 1 frames"), "{out}");
+    assert!(named.exists());
+
+    let all = dir.path().join("all");
+    psxvc(&[
+        "export",
+        bin_s,
+        "--all",
+        "--quiet",
+        "-o",
+        all.to_str().unwrap(),
+    ]);
+    let names: Vec<String> = std::fs::read_dir(&all)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["d-MOVIE-OPEN-0.mkv"]);
+}
+
+#[test]
+fn export_rejects_bad_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = write_decodable_disc(dir.path(), 2);
+    let bin_s = bin.to_str().unwrap();
+    psxvc(&["scan", "--quiet", bin_s]);
+    for args in [
+        vec!["export", bin_s],
+        vec!["export", bin_s, "--stream", "9"],
+        vec!["export", bin_s, "--stream", "0", "--sar", "4"],
+        vec!["export", bin_s, "--stream", "0", "--sar", "0:1"],
+        vec!["export", bin_s, "--stream", "0", "-o", "x.mp4"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_psxvc"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?} should fail");
+    }
+}
+
+#[test]
 fn missing_stream_or_frame_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let bin = write_decodable_disc(dir.path(), 2);

@@ -13,7 +13,7 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, **
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
 | Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned and compared with jPSXdec; results and open issues in `docs/target-games.md` |
 | 2. Decode MVP | **Done**: `psx-mdec` (STRv2/v3, `accurate` and `hq` IDCT), `psx-xa`, `psx-stream`, `psxvc frame` / `audio` / `frame-hashes`. Matches jPSXdec on all 3 scanned discs: see `docs/target-games.md` |
-| 3. Export | **Next**. Approach proven by a prototype: read `docs/export-notes.md` first |
+| 3. Export | **In progress**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, checked on all 3 scanned discs. Still open: `--cfr`, Opus, player testing. See `docs/export-notes.md` |
 | 4–6 | Not started |
 
 Keep this table up to date as phases land.
@@ -72,7 +72,7 @@ jPSXdec's source and docs (`jpsxdec/modules/*`, its PlayStation1_STR_format.txt)
 ```
 psxvc scan  game.cue              # writes game.psxidx.json, lists streams
 psxvc list  game.psxidx.json      # id, type, WxH, frames, fps, audio
-psxvc export game.cue --stream 3 --preset archive|av1|h264 [--idct accurate|hq] [--cfr] [--ffmpeg path] [-o out.mkv]
+psxvc export game.cue --stream 3 --preset archive|av1|h264 [--idct accurate|hq] [--sar W:H] [--cfr, not built yet] [--ffmpeg path] [-o out.mkv]
 psxvc export game.cue --all --preset av1 -o out/
 psxvc frame game.cue --stream 3 --frame 120 -o f.png   # quick visual check
 psxvc audio game.cue --stream 3 -o a.wav               # native-rate WAV dump
@@ -84,7 +84,7 @@ psxvc audio game.cue --stream 3 -o a.wav               # native-rate WAV dump
 
 1. **Foundations** (done): workspace, CI (fmt/clippy/test), CUE/BIN reader, sector parsing, disc indexer for STR/XA.
 2. **Decode MVP** (done): STRv2/v3 bitstream, both IDCTs, XA decoder, PNG frame dump and WAV dump.
-3. **Export**: `psx-export` built from the prototype in `tools/pipe-prototype`, FFV1/FLAC MKV archive preset, AV1/H.264 presets, VFR timestamps, colour/SAR metadata, A/V sync. See `docs/export-notes.md`.
+3. **Export**: `psx-export`, FFV1/FLAC MKV archive preset, AV1/H.264 presets, VFR timestamps, colour/SAR metadata, A/V sync. See `docs/export-notes.md`.
 4. **Coverage**: the phase 2 and 3 formats above, broken-frame handling (skip or repeat with a warning).
 5. **GUI**: Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue. FFmpeg ships inside the app as a Tauri sidecar, in a build trimmed to the codecs the presets need; see the licensing notes in `docs/export-notes.md`.
 6. **Optional filters**: deblock, deband, and upscaling hooks (e.g. external model via ffmpeg filter).

@@ -5,6 +5,7 @@ use psx_disc::{RawSector, Result, SectorKind, SectorSource};
 use psx_index::audio::XaFormat;
 use psx_index::video::{StrHeader, HEADER_SIZE};
 use psx_index::{AudioStream, FrameInfo, VideoStream};
+use std::collections::VecDeque;
 
 /// Bytes of frame data in each STR video sector, after the sector's header.
 pub const CHUNK_DATA_SIZE: usize = 2016;
@@ -65,6 +66,39 @@ fn is_stream_sector(s: &RawSector, audio: &AudioStream) -> bool {
         && XaFormat::from_coding_info(sh.coding_info) == Some(audio.format)
 }
 
+/// Reads an audio stream's sectors one at a time, in disc order, without holding
+/// more than a small stretch of the disc in memory.
+pub struct AudioSectors<'a> {
+    audio: &'a AudioStream,
+    next_lba: u32,
+    buffered: VecDeque<RawSector>,
+}
+
+impl<'a> AudioSectors<'a> {
+    pub fn new(audio: &'a AudioStream) -> Self {
+        AudioSectors {
+            audio,
+            next_lba: audio.first_lba,
+            buffered: VecDeque::new(),
+        }
+    }
+
+    /// The stream's next sector, or `None` at its end.
+    pub fn next_sector(&mut self, src: &mut dyn SectorSource) -> Result<Option<RawSector>> {
+        while self.buffered.is_empty() && self.next_lba <= self.audio.last_lba {
+            let n = READ_CHUNK.min(self.audio.last_lba - self.next_lba + 1);
+            let sectors = src.read_range(self.next_lba, n)?;
+            self.buffered.extend(
+                sectors
+                    .into_iter()
+                    .filter(|s| is_stream_sector(s, self.audio)),
+            );
+            self.next_lba += n;
+        }
+        Ok(self.buffered.pop_front())
+    }
+}
+
 /// Call `f` with each sector of an audio stream, in disc order. Returns how many
 /// sectors there were, which should equal the stream's `sector_count`.
 pub fn for_each_audio_sector(
@@ -73,16 +107,10 @@ pub fn for_each_audio_sector(
     mut f: impl FnMut(&[u8]),
 ) -> Result<u32> {
     let mut found = 0;
-    let mut lba = audio.first_lba;
-    while lba <= audio.last_lba {
-        let n = READ_CHUNK.min(audio.last_lba - lba + 1);
-        for s in src.read_range(lba, n)? {
-            if is_stream_sector(&s, audio) {
-                f(s.user_data());
-                found += 1;
-            }
-        }
-        lba += n;
+    let mut sectors = AudioSectors::new(audio);
+    while let Some(s) = sectors.next_sector(src)? {
+        f(s.user_data());
+        found += 1;
     }
     Ok(found)
 }

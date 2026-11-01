@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use psx_disc::{BinCueDisc, SectorSource};
-use psx_index::{scan, DiscIndex, ScanOptions, VideoStream};
+use psx_export::{export_stream, ffmpeg, ExportOptions, Preset};
+use psx_index::{scan, AudioStream, DiscIndex, ScanOptions, VideoStream};
 use psx_mdec::{decode_coefficients, decode_frame, reconstruct, Idct};
 use psx_stream::{demux_frame, for_each_audio_sector};
 use psx_xa::{write_wav, XaDecoder};
@@ -50,6 +51,38 @@ enum Cmd {
         /// Output .bin path; a matching .cue is written beside it.
         #[arg(short, long)]
         output: PathBuf,
+    },
+    /// Encode video streams and their audio with FFmpeg, keeping each frame's
+    /// exact timing.
+    Export {
+        disc: PathBuf,
+        /// Video stream id (from `psxvc list`).
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        stream: Option<usize>,
+        /// Export every video stream, with `-o` as the output folder.
+        #[arg(long)]
+        all: bool,
+        #[arg(long, value_enum, default_value_t = PresetArg::Archive)]
+        preset: PresetArg,
+        #[arg(long, value_enum, default_value_t = IdctArg::Hq)]
+        idct: IdctArg,
+        /// Sample aspect ratio to tag the video with, as `W:H`.
+        #[arg(long, default_value = "1:1")]
+        sar: String,
+        /// The FFmpeg to run (default: beside `psxvc`, then PATH).
+        #[arg(long)]
+        ffmpeg: Option<PathBuf>,
+        /// Index to look the stream up in (default: `<name>.psxidx.json` beside
+        /// the disc, or else scan the disc).
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// Output file, or folder with `--all` (default: the current folder, with
+        /// a name made from the disc, file and stream).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Don't print the progress indicator.
+        #[arg(short, long)]
+        quiet: bool,
     },
     /// Decode one video frame to a PNG, as a quick visual check.
     Frame {
@@ -104,6 +137,26 @@ enum IdctArg {
     Accurate,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum PresetArg {
+    /// Lossless FFV1 and FLAC in MKV.
+    Archive,
+    /// H.264 and FLAC in MP4 (or MKV, going by the output's extension).
+    H264,
+    /// AV1 and FLAC in MKV (or MP4, going by the output's extension).
+    Av1,
+}
+
+impl From<PresetArg> for Preset {
+    fn from(a: PresetArg) -> Preset {
+        match a {
+            PresetArg::Archive => Preset::Archive,
+            PresetArg::H264 => Preset::H264,
+            PresetArg::Av1 => Preset::Av1,
+        }
+    }
+}
+
 impl From<IdctArg> for Idct {
     fn from(a: IdctArg) -> Idct {
         match a {
@@ -154,6 +207,34 @@ fn main() -> Result<()> {
             };
             extract(&disc, start, count, &output)?;
         }
+        Cmd::Export {
+            disc,
+            stream,
+            all,
+            preset,
+            idct,
+            sar,
+            ffmpeg,
+            index,
+            output,
+            quiet,
+        } => {
+            let options = ExportOptions {
+                preset: preset.into(),
+                idct: idct.into(),
+                sar: parse_sar(&sar)?,
+                ffmpeg: ffmpeg::locate(ffmpeg.as_deref()),
+            };
+            let idx = load_or_scan(&disc, index)?;
+            if all {
+                export_all(&disc, &idx, &options, output.as_deref(), quiet)?;
+            } else {
+                let id = stream.context("give either --stream <id> or --all")?;
+                let v = video_stream(&idx, id)?;
+                let out = output.unwrap_or_else(|| default_export_name(&disc, v, options.preset));
+                export_one(&disc, &idx, v, &options, &out, quiet)?;
+            }
+        }
         Cmd::Frame {
             disc,
             stream,
@@ -196,6 +277,99 @@ fn video_stream(idx: &DiscIndex, id: usize) -> Result<&VideoStream> {
 
 fn open_disc(disc: &Path) -> Result<BinCueDisc> {
     BinCueDisc::open(disc).with_context(|| format!("opening {}", disc.display()))
+}
+
+fn parse_sar(s: &str) -> Result<(u32, u32)> {
+    let (w, h) = s.split_once(':').context("--sar must be W:H")?;
+    let sar = (w.trim().parse()?, h.trim().parse()?);
+    if sar.0 == 0 || sar.1 == 0 {
+        bail!("--sar can't have a zero in it");
+    }
+    Ok(sar)
+}
+
+/// `<disc>-<file>-<stream>.<ext>`, e.g. `PE2 D1-FMV1-FMV016B-3.mkv`.
+fn default_export_name(disc: &Path, v: &VideoStream, preset: Preset) -> PathBuf {
+    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
+    let file = v
+        .file
+        .as_deref()
+        .map(|f| {
+            let f = f.trim_start_matches('/');
+            let f = f.rsplit_once('.').map_or(f, |(name, _)| name);
+            format!("{}-", f.replace(['/', '\\'], "-"))
+        })
+        .unwrap_or_default();
+    PathBuf::from(format!(
+        "{stem}-{file}{}.{}",
+        v.id,
+        preset.default_extension()
+    ))
+}
+
+fn export_one(
+    disc: &Path,
+    idx: &DiscIndex,
+    v: &VideoStream,
+    options: &ExportOptions,
+    output: &Path,
+    quiet: bool,
+) -> Result<()> {
+    let audio: Vec<&AudioStream> = idx
+        .audio
+        .iter()
+        .filter(|a| v.audio.contains(&a.id))
+        .collect();
+    let mut src = open_disc(disc)?;
+    let mut last_pct = u32::MAX;
+    let report = export_stream(&mut src, v, &audio, options, output, |done, total| {
+        let pct = (done as u64 * 100 / total.max(1) as u64) as u32;
+        if !quiet && pct != last_pct {
+            last_pct = pct;
+            eprint!("\rStream {}: {pct:3}%", v.id);
+            let _ = std::io::stderr().flush();
+        }
+    });
+    if !quiet {
+        eprintln!();
+    }
+    let report = report.with_context(|| format!("exporting video stream {}", v.id))?;
+    for w in &report.warnings {
+        eprintln!("WARNING: stream {}: {w}", v.id);
+    }
+    println!(
+        "Wrote {} of {} frames and {} audio sectors to {}",
+        report.frames_written,
+        v.frames.len(),
+        report.audio_packets,
+        output.display()
+    );
+    Ok(())
+}
+
+/// Export every video stream, carrying on past failures so one bad stream doesn't
+/// cost the rest of the disc.
+fn export_all(
+    disc: &Path,
+    idx: &DiscIndex,
+    options: &ExportOptions,
+    output: Option<&Path>,
+    quiet: bool,
+) -> Result<()> {
+    let dir = output.unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut failed = 0;
+    for v in &idx.video {
+        let out = dir.join(default_export_name(disc, v, options.preset));
+        if let Err(e) = export_one(disc, idx, v, options, &out, quiet) {
+            eprintln!("ERROR: {e:#}");
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} streams failed", idx.video.len());
+    }
+    Ok(())
 }
 
 fn export_frame(
