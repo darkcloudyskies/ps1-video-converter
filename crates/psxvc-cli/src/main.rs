@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use psx_disc::{BinCueDisc, SectorSource};
-use psx_index::{scan, DiscIndex, ScanOptions};
+use psx_index::{scan, DiscIndex, ScanOptions, VideoStream};
+use psx_mdec::{decode_coefficients, decode_frame, reconstruct, Idct};
+use psx_stream::{demux_frame, for_each_audio_sector};
+use psx_xa::{write_wav, XaDecoder};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -48,6 +51,66 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Decode one video frame to a PNG, as a quick visual check.
+    Frame {
+        disc: PathBuf,
+        /// Video stream id (from `psxvc list`).
+        #[arg(long)]
+        stream: usize,
+        /// Frame number (from `psxvc list --frames`).
+        #[arg(long)]
+        frame: u32,
+        #[arg(long, value_enum, default_value_t = IdctArg::Hq)]
+        idct: IdctArg,
+        /// Index to look the stream up in (default: `<name>.psxidx.json` beside
+        /// the disc, or else scan the disc).
+        #[arg(long)]
+        index: Option<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Decode an audio stream to a WAV file at its native rate.
+    Audio {
+        disc: PathBuf,
+        /// Audio stream id (from `psxvc list`).
+        #[arg(long)]
+        stream: usize,
+        /// Index to look the stream up in (default: `<name>.psxidx.json` beside
+        /// the disc, or else scan the disc).
+        #[arg(long)]
+        index: Option<PathBuf>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Print a checksum per frame of a stream's decoded coefficients and
+    /// `accurate` planes, for comparing with tools/jpsxdec-oracle.
+    FrameHashes {
+        disc: PathBuf,
+        /// Video stream id (from `psxvc list`).
+        #[arg(long)]
+        stream: usize,
+        /// Index to look the stream up in (default: `<name>.psxidx.json` beside
+        /// the disc, or else scan the disc).
+        #[arg(long)]
+        index: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum IdctArg {
+    /// Double precision with no rounding along the way.
+    Hq,
+    /// Fixed-point math, as the console's MDEC does.
+    Accurate,
+}
+
+impl From<IdctArg> for Idct {
+    fn from(a: IdctArg) -> Idct {
+        match a {
+            IdctArg::Hq => Idct::Hq,
+            IdctArg::Accurate => Idct::Accurate,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -90,6 +153,176 @@ fn main() -> Result<()> {
                 (None, None) => bail!("give either --video <id> or --range START:COUNT"),
             };
             extract(&disc, start, count, &output)?;
+        }
+        Cmd::Frame {
+            disc,
+            stream,
+            frame,
+            idct,
+            index,
+            output,
+        } => export_frame(&disc, index, stream, frame, idct.into(), &output)?,
+        Cmd::Audio {
+            disc,
+            stream,
+            index,
+            output,
+        } => export_audio(&disc, index, stream, &output)?,
+        Cmd::FrameHashes {
+            disc,
+            stream,
+            index,
+        } => print_frame_hashes(&disc, index, stream)?,
+    }
+    Ok(())
+}
+
+/// The given index; else the one beside the disc; else a fresh scan.
+fn load_or_scan(disc: &Path, index: Option<PathBuf>) -> Result<DiscIndex> {
+    let path = index.unwrap_or_else(|| default_index_path(disc));
+    if path.exists() {
+        load_index(&path)
+    } else {
+        scan_disc(disc, false)
+    }
+}
+
+fn video_stream(idx: &DiscIndex, id: usize) -> Result<&VideoStream> {
+    idx.video
+        .iter()
+        .find(|v| v.id == id)
+        .with_context(|| format!("no video stream {id}"))
+}
+
+fn open_disc(disc: &Path) -> Result<BinCueDisc> {
+    BinCueDisc::open(disc).with_context(|| format!("opening {}", disc.display()))
+}
+
+fn export_frame(
+    disc: &Path,
+    index: Option<PathBuf>,
+    stream: usize,
+    number: u32,
+    idct: Idct,
+    output: &Path,
+) -> Result<()> {
+    let idx = load_or_scan(disc, index)?;
+    let v = video_stream(&idx, stream)?;
+    let info = v
+        .frames
+        .iter()
+        .find(|f| f.number == number)
+        .with_context(|| format!("video stream {stream} has no frame {number}"))?;
+
+    let mut src = open_disc(disc)?;
+    let demuxed = demux_frame(&mut src, v, info)?;
+    if demuxed.missing_chunks > 0 {
+        eprintln!(
+            "WARNING: frame {number} is missing {} of {} sectors",
+            demuxed.missing_chunks, info.chunk_count
+        );
+    }
+    let planes = decode_frame(&demuxed.data, info.width, info.height, idct)
+        .with_context(|| format!("decoding frame {number}"))?;
+
+    let file =
+        std::fs::File::create(output).with_context(|| format!("creating {}", output.display()))?;
+    let mut png = png::Encoder::new(
+        std::io::BufWriter::new(file),
+        info.width as u32,
+        info.height as u32,
+    );
+    png.set_color(png::ColorType::Rgb);
+    png.set_depth(png::BitDepth::Eight);
+    let mut writer = png.write_header()?;
+    writer.write_image_data(&planes.to_rgb8())?;
+    writer.finish()?;
+    println!(
+        "Wrote frame {number} ({}x{}) to {}",
+        info.width,
+        info.height,
+        output.display()
+    );
+    Ok(())
+}
+
+fn export_audio(disc: &Path, index: Option<PathBuf>, stream: usize, output: &Path) -> Result<()> {
+    let idx = load_or_scan(disc, index)?;
+    let a = idx
+        .audio
+        .iter()
+        .find(|a| a.id == stream)
+        .with_context(|| format!("no audio stream {stream}"))?;
+    let f = a.format;
+
+    let mut src = open_disc(disc)?;
+    let mut decoder = XaDecoder::new(f.channels == 2, f.bits_per_sample);
+    let mut pcm = Vec::new();
+    let found = for_each_audio_sector(&mut src, a, |data| decoder.decode_sector(data, &mut pcm))?;
+    if found != a.sector_count {
+        eprintln!(
+            "WARNING: expected {} audio sectors but found {found}",
+            a.sector_count
+        );
+    }
+
+    let file =
+        std::fs::File::create(output).with_context(|| format!("creating {}", output.display()))?;
+    let mut out = std::io::BufWriter::new(file);
+    write_wav(&mut out, f.sample_rate, f.channels as u16, &pcm)?;
+    out.flush()?;
+    println!(
+        "Wrote {found} sectors, {:.2} s at {} Hz, to {}",
+        pcm.len() as f64 / f.channels as f64 / f.sample_rate as f64,
+        f.sample_rate,
+        output.display()
+    );
+    Ok(())
+}
+
+/// FNV-1a, 64-bit. It only has to catch differences, and it's trivial to
+/// reproduce exactly in the Java oracle.
+#[derive(Clone, Copy)]
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+    fn add(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// One line per frame: number, coefficient hash, plane hash. A frame that won't
+/// decode prints the error class in place of the hashes.
+fn print_frame_hashes(disc: &Path, index: Option<PathBuf>, stream: usize) -> Result<()> {
+    let idx = load_or_scan(disc, index)?;
+    let v = video_stream(&idx, stream)?;
+    let mut src = open_disc(disc)?;
+    for info in &v.frames {
+        let demuxed = demux_frame(&mut src, v, info)?;
+        match decode_coefficients(&demuxed.data, info.width, info.height) {
+            Ok(blocks) => {
+                let mut coefs = Fnv::new();
+                for b in &blocks {
+                    coefs.add(&[b.qscale]);
+                    for c in &b.coefs {
+                        coefs.add(&c.to_le_bytes());
+                    }
+                }
+                let p = reconstruct(&blocks, info.width, info.height, Idct::Accurate);
+                let mut planes = Fnv::new();
+                for plane in [&p.y, &p.cb, &p.cr] {
+                    for &s in plane.iter() {
+                        planes.add(&(s as i32).to_le_bytes());
+                    }
+                }
+                println!("{} {:016x} {:016x}", info.number, coefs.0, planes.0);
+            }
+            Err(e) => println!("{} error {e}", info.number),
         }
     }
     Ok(())

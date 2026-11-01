@@ -1,0 +1,9 @@
+[package]
+name = "psx-mdec"
+description = "PS1 STR bitstream decoder and MDEC IDCT (YCbCr 4:2:0 output)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

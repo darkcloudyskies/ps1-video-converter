@@ -1,0 +1,10 @@
+[package]
+name = "psx-stream"
+description = "Pulls a PS1 disc's interleaved sectors back apart into video frames and audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+psx-disc.workspace = true
+psx-index.workspace = true

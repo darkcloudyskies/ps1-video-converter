@@ -1,0 +1,8 @@
+[package]
+name = "psx-xa"
+description = "CD-ROM XA ADPCM audio decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]

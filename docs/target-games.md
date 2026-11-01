@@ -38,9 +38,31 @@ so their fps assumes 2x.
 ## Comparison with jPSXdec
 
 - **Video:** all 67 streams match on sector range, dimensions and frame count.
-- **Variants:** not compared, because the `.idx` file doesn't record them. Decoding
-  will test these.
+- **Variants:** the `.idx` file doesn't record them, but decoding confirms them:
+  jPSXdec accepts every frame as the variant we report.
 - **Audio:** all 53 streams match on sector range.
+
+### Decoding
+
+`tools/jpsxdec-oracle/compare.ps1` compares decoded output on every stream:
+
+| Disc | Video streams | Frames | Frames that differ | Audio streams | Audio that differs |
+|---|---|---|---|---|---|
+| Koudelka Disc 4 | 10 | 9,596 | 0 | 11 | 0 |
+| Parasite Eve Disc 1 | 21 | 10,497 | 0 | 21 | 0 |
+| Parasite Eve II Disc 1 | 36 | 19,183 | 0 | 21 | 0 |
+
+For video, this compares the MDEC coefficients and the `accurate` YCbCr planes of
+each frame by checksum, using jPSXdec's own demux of the frame. For audio, it
+compares the PCM byte for byte.
+
+This doesn't cover:
+
+- **`hq` output:** it's different from jPSXdec by design, so unit tests check it
+  against the textbook IDCT formula instead.
+- **XA mono, 18.9 kHz or 8-bit audio:** none of these discs use them, so only unit
+  tests cover them.
+- **`/MOVIE/ENDING.MCF` on Koudelka Disc 4:** see the open issue below.
 
 ## Open issues
 

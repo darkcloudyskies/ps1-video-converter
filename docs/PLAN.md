@@ -12,8 +12,9 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, an
 |---|---|
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
 | Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned and compared with jPSXdec; results and open issues in `docs/target-games.md` |
-| 2. Decode MVP | Next |
-| 3–6 | Not started |
+| 2. Decode MVP | **Done**: `psx-mdec` (STRv2/v3, `accurate` and `hq` IDCT), `psx-xa`, `psx-stream`, `psxvc frame` / `audio` / `frame-hashes`. Matches jPSXdec on all 3 scanned discs: see `docs/target-games.md` |
+| 3. Export | Next |
+| 4–6 | Not started |
 
 Keep this table up to date as phases land.
 
@@ -64,7 +65,7 @@ These three are the first acceptance targets, and phase priority follows them.
 | 2 | STRv1, FF7 (camera-data frames), FF8/FF9 variants, Iki | XA 8-bit, SPU-ADPCM streams |
 | 3 | Lain, Crusader, Ace Combat 3, Aconcagua, other one-offs | game-specific audio |
 
-jPSXdec's source and docs (`jpsxdec/modules/*`, its PlayStation1_STR_format.txt) are the spec reference for the bitstream variants. We use them as documentation and test oracles and don't port code line by line (jPSXdec is GPL; check licence compatibility if we ever copy anything).
+jPSXdec's source and docs (`jpsxdec/modules/*`, its PlayStation1_STR_format.txt) are the spec reference for the bitstream variants. We use them as documentation and test oracles and don't copy code: jPSXdec's licence is its own non-commercial one, with conditions on derivative works. `tools/jpsxdec-oracle` calls its jar at run time and includes none of its code.
 
 ## CLI shape
 
@@ -93,7 +94,7 @@ Development and testing both happen on the owner's Windows machine, with the rea
   - Build test streams with **psxavenc**, the open-source PS1 STR/XA encoder from PSn00bSDK, from frames and audio we create, e.g. ffmpeg `testsrc`, colour bars and gradients. Gradients are good at exposing banding and chroma problems. Because we know the source picture, we can measure quality (PSNR/SSIM), not only check that output matches.
   - Run **jPSXdec** (Java) as the reference decoder for the same test files.
   - Wrap the generated streams in a minimal BIN/CUE so the full disc → export pipeline gets tested.
-- **Real discs:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `psxvc scan` summaries plus jPSXdec `.idx` files serve the same purpose.
+- **Real discs:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `tools/jpsxdec-oracle/compare.ps1` does the decode comparison, stream by stream, and `psxvc scan` summaries plus jPSXdec `.idx` files cover the index.
 - **Debugging clips:** `psxvc extract-sectors` cuts one stream (a few MB) into a small BIN/CUE. These contain game data, so never commit them. Keep them out of `tests/fixtures/`, where `.gitignore` allows `.bin` and `.cue` files.
 
 **Tool status:** Rust, Java 21 and FFmpeg 9 are installed. jPSXdec is a sibling checkout at `../jpsxdec`, with a built jar at `jpsxdec/_ant/release/jpsxdec.jar`. psxavenc still needs installing. `clang` and `pkg-config` are also missing, which matters if Phase 3 uses `rsmpeg` bindings.
