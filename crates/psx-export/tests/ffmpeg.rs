@@ -682,6 +682,116 @@ fn failed_export_keeps_the_previous_file() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
+/// Blank out the data of a frame's only sector, keeping its header. That fails both
+/// the decoder and the sector's EDC check. Returns the stream without that frame.
+fn damage_frame(disc: &mut MemoryDisc, v: &VideoStream, index: usize) -> VideoStream {
+    let lba = v.frames[index].last_lba as usize;
+    disc.sectors[lba].bytes[24 + 32..24 + 2048].fill(0);
+    let mut kept = v.clone();
+    kept.frames.remove(index);
+    kept
+}
+
+#[test]
+fn broken_frame_is_skipped_and_nothing_else_moves() {
+    if !have_ffmpeg() {
+        return;
+    }
+    // The first frame, a middle one and the last one.
+    for index in [0, 2, GAPS.len()] {
+        let mut disc = synthetic_disc();
+        let idx = index_of(&mut disc);
+        let v = &idx.video[0];
+        let audio = audio_of(&idx, v);
+        let base = base_sector(v, &audio);
+        let number = v.frames[index].number;
+        let kept = damage_frame(&mut disc, v, index);
+        let dir = tempfile::tempdir().unwrap();
+        let raw = ["-f", "rawvideo", "-fps_mode", "passthrough"];
+
+        let file = dir.path().join("vfr.mkv");
+        let opts = options(Preset::Archive, Idct::Hq, (1, 1));
+        let r = export_stream(&mut disc, v, &audio, &opts, &file, |_, _| {}).unwrap();
+        assert_eq!(r.frames_written, GAPS.len());
+        let warned = |text: &str| r.warnings.iter().any(|w| w.contains(text));
+        assert!(
+            warned(&format!("skipped frame {number}")),
+            "{:?}",
+            r.warnings
+        );
+        assert!(warned("EDC"), "{:?}", r.warnings);
+        check_video_times(&file, &kept, base, MKV_TOLERANCE);
+        assert!(decoded_back(&file, "0:v", &raw) == expected_video(&mut disc, &kept, Idct::Hq));
+        let back = decoded_back(&file, "0:a:0", &["-f", "s16le"]);
+        assert!(back == expected_audio(&mut disc, audio[0]));
+
+        // At a constant frame rate, the frame before it holds for the gap.
+        let file = dir.path().join("cfr.mkv");
+        let mut opts = options(Preset::Archive, Idct::Hq, (1, 1));
+        opts.cfr = true;
+        let r = export_stream(&mut disc, v, &audio, &opts, &file, |_, _| {}).unwrap();
+        let rate = r.constant_rate.unwrap();
+        let want = expected_cfr_video(&mut disc, &kept, base, rate, Idct::Hq);
+        let back = decoded_back(&file, "0:v", &raw);
+        // As in check_cfr, the last picture may hold for one more tick.
+        assert!(back.len() >= want.len(), "frame {number}");
+        assert!(back[..want.len()] == want[..], "frame {number}");
+    }
+}
+
+#[test]
+fn damaged_audio_sector_draws_a_warning() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let mut disc = synthetic_disc();
+    let idx = index_of(&mut disc);
+    let v = &idx.video[0];
+    let audio = audio_of(&idx, v);
+    disc.sectors[audio[0].first_lba as usize].bytes[100] ^= 0xFF;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("x.mkv");
+    let opts = options(Preset::Archive, Idct::Hq, (1, 1));
+    let r = export_stream(&mut disc, v, &audio, &opts, &file, |_, _| {}).unwrap();
+    assert!(
+        r.warnings.iter().any(|w| w.contains("EDC check: 1")),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn strv1_stream_exports() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let mut disc = synthetic_disc();
+    let idx = index_of(&mut disc);
+    let frames = idx.video[0].frames.clone();
+    // Same bitstream apart from the version, so the picture has to stay the same.
+    let dir = tempfile::tempdir().unwrap();
+    let opts = options(Preset::Archive, Idct::Hq, (1, 1));
+    let raw = ["-f", "rawvideo", "-fps_mode", "passthrough"];
+    let file = dir.path().join("v2.mkv");
+    export_stream(&mut disc, &idx.video[0], &[], &opts, &file, |_, _| {}).unwrap();
+    let v2 = decoded_back(&file, "0:v", &raw);
+
+    for f in &frames {
+        let s = &disc.sectors[f.last_lba as usize];
+        let sub = s.subheader().unwrap();
+        let mut data = s.user_data().to_vec();
+        data[26] = 1; // the sector header's version
+        data[32 + 6] = 1; // the frame header's version
+        disc.sectors[f.last_lba as usize] = RawSector::build_mode2(f.last_lba, sub, &data);
+    }
+    let idx = index_of(&mut disc);
+    assert_eq!(idx.video[0].variant, "STRv1");
+    let file = dir.path().join("v1.mkv");
+    let r = export_stream(&mut disc, &idx.video[0], &[], &opts, &file, |_, _| {}).unwrap();
+    assert_eq!(r.warnings, Vec::<String>::new());
+    assert!(decoded_back(&file, "0:v", &raw) == v2);
+}
+
 #[test]
 fn missing_ffmpeg_is_a_clear_error() {
     let mut disc = synthetic_disc();

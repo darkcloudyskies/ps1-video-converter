@@ -125,8 +125,24 @@ a failed export can't replace a good file or leave half of one behind. FFmpeg's
 output is read on its own thread so neither side can block on a full pipe. If FFmpeg
 quits mid-stream, the error shows what it printed.
 
-A frame that won't decode is skipped with a warning. That leaves a gap in the video
-but doesn't move any other frame. Phase 4 decides on broken frames properly.
+### Broken frames
+
+A frame that won't decode is skipped with a warning, and no other frame moves. There's
+no separate "repeat" mode because it wouldn't change the picture: with variable frame
+rate, the frame before stays on screen until the next one's timestamp, and with
+`--cfr` the `fps` filter repeats it on each tick. If the first frame is the broken one,
+`--cfr` shows the next good frame from the start instead. Audio isn't touched.
+
+Nothing is salvaged from a partly decodable frame, because the rest of it would be a
+wrong picture. If every frame fails, the export fails and writes no file.
+
+A frame or audio sector that fails its EDC check is still used, with a warning, since
+the damage may be small or may fall in padding. This matters because damage can decode
+without any error, so the warning may be the only sign of a wrong picture. The EDC
+only detects damage: `psxvc` doesn't use the ECC to repair it.
+
+`tests/ffmpeg.rs` checks all of this on a synthetic stream, with the first, a middle
+and the last frame broken, in turn. No scanned disc has a broken frame or EDC error.
 
 ## Results
 
@@ -197,7 +213,8 @@ in the Windows default player, thought to be the Photos app:
   `archive` is for preservation, so this is accepted for now.
 - **AV1 seeking:** that file had key frames up to 10.74 s apart, which is the likely
   cause. Both lossy presets now use `-g 30`, which brings the longest gap to about 2 s
-  with little change in size. The new file hasn't been retried yet.
+  with little change in size. On the new file, seeking was fairly normal when the owner
+  retried it, with a bit of lag that may just be the player.
 
 ## Why `h264` is 8-bit with AAC
 
@@ -226,8 +243,6 @@ tested that. Anyone who wants 10-bit or lossless audio has `av1` and `archive`.
 - **Not tested on real data:** 1x-speed discs, and 18.9 kHz, mono or 8-bit audio.
   None of the three scanned discs have them. Multiple audio tracks are handled in
   the code, but no scanned stream has more than one, and nothing has tested them.
-- **AV1 seeking:** retry it in the Windows default player now that key frames are
-  closer together.
 - **Player support:** only Chromium and the Windows default player have been tried
   (see Player testing). Still to try, if they matter: VLC or mpv, and a TV, phone or
   other hardware decoder, which may struggle with full-range H.264 or variable frame

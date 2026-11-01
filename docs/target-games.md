@@ -1,7 +1,8 @@
 # Target games
 
 The first acceptance targets: **Parasite Eve** (2 discs), **Parasite Eve II**
-(2 discs) and **Koudelka** (4 discs).
+(2 discs) and **Koudelka** (4 discs). For now, only the 3 discs scanned below matter.
+The others can be filled in if they're picked up later.
 
 The results below come from `psxvc scan`, compared with jPSXdec v2.1 (beta). To
 fill in the rest, run on each disc:
@@ -64,15 +65,15 @@ This doesn't cover:
   tests cover them.
 - **`/MOVIE/ENDING.MCF` on Koudelka Disc 4:** see the open issue below.
 
-## Open issues
+## Left out
 
-- **Koudelka Disc 4, `/MOVIE/ENDING.MCF`:** jPSXdec also finds only the audio, at
+- **Koudelka Disc 4, `/MOVIE/ENDING.MCF`:** the owner doesn't need this file, so
+  nobody is working on it. What's known so far: jPSXdec also finds only the audio, at
   1x disc speed, in a repeating pattern of 1 audio sector then 3 data sectors. All
   17,949 data sectors start with `60 01 01 00`, where STR uses `60 01 01 80`, and
   have no width or height at the STR offsets. Bytes 8–11 count up once per sector.
   This is a custom format that neither tool supports. It's probably the 5:19 ending
-  movie, but nothing has been decoded to confirm that. If it is, it moves into
-  phase 1.
+  movie, but nothing has been decoded to confirm that.
 
 ## Settled questions
 

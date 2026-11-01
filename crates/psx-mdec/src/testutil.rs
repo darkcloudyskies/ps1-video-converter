@@ -84,14 +84,14 @@ pub fn encode_frame(blocks: &[Block], qscale: u8, version: u16) -> Vec<u8> {
     let mut codes: u32 = 0;
     for (i, b) in blocks.iter().enumerate() {
         let dc = b.coefs[0] as i32;
-        if version == 2 {
-            w.put(dc as u32 & 0x3FF, 10);
-        } else {
+        if version == 3 {
             match i % BLOCKS_PER_MACROBLOCK {
                 0 => put_dc_v3(&mut w, &DC_CHROMA_CODES, dc, &mut last_cr),
                 1 => put_dc_v3(&mut w, &DC_CHROMA_CODES, dc, &mut last_cb),
                 _ => put_dc_v3(&mut w, &DC_LUMA_CODES, dc, &mut last_y),
             }
+        } else {
+            w.put(dc as u32 & 0x3FF, 10);
         }
         let mut run = 0;
         for &pos in &ZIGZAG[1..] {
@@ -107,10 +107,10 @@ pub fn encode_frame(blocks: &[Block], qscale: u8, version: u16) -> Vec<u8> {
         w.put_str(EOB_CODE);
         codes += 2; // DC and end of block
     }
-    w.put_str(if version == 2 {
-        "0111111111"
-    } else {
+    w.put_str(if version == 3 {
         "1111111111"
+    } else {
+        "0111111111"
     });
 
     let mut out = Vec::new();

@@ -1,10 +1,10 @@
-//! STRv2 and STRv3 bitstream decoding, down to quantized coefficients.
+//! STRv1, STRv2 and STRv3 bitstream decoding, down to quantized coefficients.
 //!
 //! A demuxed frame starts with an 8-byte header. Then come the blocks: each
 //! macroblock holds Cr, Cb, Y1, Y2, Y3, Y4, and each block is a DC value, some
-//! AC run/level codes and an end-of-block code. The two versions differ only in
-//! how they store DC: STRv2 uses plain 10-bit values and STRv3 uses MPEG-1 style
-//! differentials from the previous block of the same kind.
+//! AC run/level codes and an end-of-block code. STRv1 and STRv2 are the same
+//! apart from the version number, and store DC as plain 10-bit values. STRv3
+//! uses MPEG-1 style differentials from the previous block of the same kind.
 
 use crate::bits::{BitReader, OutOfBits};
 use crate::tables::{
@@ -48,7 +48,7 @@ impl FrameHeader {
                 "bad header (magic {magic:#06x}, qscale {qscale})"
             )));
         }
-        if version != 2 && version != 3 {
+        if !(1..=3).contains(&version) {
             return Err(Error::Unsupported(format!("STR version {version}")));
         }
         Ok(FrameHeader {
@@ -126,10 +126,10 @@ pub fn decode_coefficients(data: &[u8], width: u16, height: u16) -> Result<Vec<B
         let corrupt = |detail: String| Error::Corrupt { block, detail };
 
         let mut coefs = [0i16; 64];
-        coefs[0] = if header.version == 2 {
-            r.read_signed(10).map_err(out_of_data)? as i16
-        } else {
+        coefs[0] = if header.version == 3 {
             read_dc_v3(&mut r, block % BLOCKS_PER_MACROBLOCK, &mut pred).map_err(corrupt)? as i16
+        } else {
+            r.read_signed(10).map_err(out_of_data)? as i16
         };
 
         let mut pos = 0usize;
@@ -176,9 +176,9 @@ mod tests {
     use crate::testutil::{encode_frame, sample_blocks};
 
     #[test]
-    fn roundtrip_v2_and_v3() {
+    fn roundtrip_every_version() {
         let (w, h) = (48, 32);
-        for version in [2, 3] {
+        for version in [1, 2, 3] {
             let blocks = sample_blocks(w, h, 5);
             let data = encode_frame(&blocks, 5, version);
             assert_eq!(FrameHeader::parse(&data).unwrap().version, version);
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn rejects_other_versions_and_bad_headers() {
         let mut data = encode_frame(&sample_blocks(16, 16, 1), 1, 2);
-        data[6] = 1;
+        data[6] = 4;
         assert!(matches!(
             decode_coefficients(&data, 16, 16),
             Err(Error::Unsupported(_))
@@ -217,6 +217,29 @@ mod tests {
         let data = encode_frame(&sample_blocks(16, 16, 1), 1, 2);
         let got = decode_coefficients(&data[..HEADER_SIZE + 2], 16, 16);
         assert!(matches!(got, Err(Error::EndOfData { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn escape_with_a_zero_level_still_moves_along() {
+        // FF7's STRv1 frames contain these, and the console accepts them.
+        let mut words = crate::testutil::BitWriter::default();
+        for block in 0..BLOCKS_PER_MACROBLOCK {
+            words.put(0, 10);
+            if block == 0 {
+                words.put_str(crate::tables::ESCAPE_CODE);
+                words.put(0, 6);
+                words.put(0, 10);
+                words.put_str(crate::tables::ESCAPE_CODE);
+                words.put(0, 6);
+                words.put(5, 10);
+            }
+            words.put_str(crate::tables::EOB_CODE);
+        }
+        let mut data = vec![0, 0, 0x00, 0x38, 1, 0, 1, 0];
+        data.extend(words.finish());
+        let blocks = decode_coefficients(&data, 16, 16).unwrap();
+        assert_eq!(blocks[0].coefs[ZIGZAG[1] as usize], 0);
+        assert_eq!(blocks[0].coefs[ZIGZAG[2] as usize], 5);
     }
 
     #[test]

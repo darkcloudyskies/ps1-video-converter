@@ -263,6 +263,7 @@ struct AudioTrack<'a> {
     next: Option<psx_disc::RawSector>,
     stream: &'a AudioStream,
     found: u32,
+    bad_edc: u32,
 }
 
 /// The sector of the stream's first packet, which all timestamps count from. FFmpeg
@@ -325,6 +326,7 @@ pub fn write_nut<W: Write>(
             next,
             stream: a,
             found: 0,
+            bad_edc: 0,
         });
     }
 
@@ -376,6 +378,9 @@ pub fn write_nut<W: Write>(
             let (_, i) = audio_lba.expect("no frame, so there's audio");
             let t = &mut tracks[i];
             let sector = t.next.take().expect("just found it");
+            if sector.edc_ok() == Some(false) {
+                t.bad_edc += 1;
+            }
             pcm.clear();
             t.decoder.decode_sector(sector.user_data(), &mut pcm);
             buf.clear();
@@ -393,6 +398,12 @@ pub fn write_nut<W: Write>(
             report.warnings.push(format!(
                 "audio stream {}: expected {} sectors but found {}",
                 t.stream.id, t.stream.sector_count, t.found
+            ));
+        }
+        if t.bad_edc > 0 {
+            report.warnings.push(format!(
+                "audio stream {}: sectors failing their EDC check: {}, so the sound may be damaged",
+                t.stream.id, t.bad_edc
             ));
         }
     }
@@ -423,6 +434,12 @@ fn decode_visible(
         report.warnings.push(format!(
             "frame {} is missing {} of {} sectors",
             f.number, demuxed.missing_chunks, f.chunk_count
+        ));
+    }
+    if demuxed.bad_edc_chunks > 0 {
+        report.warnings.push(format!(
+            "frame {}: {} of {} sectors fail their EDC check, so the picture may be damaged",
+            f.number, demuxed.bad_edc_chunks, f.chunk_count
         ));
     }
     match decode_frame(&demuxed.data, f.width, f.height, idct) {

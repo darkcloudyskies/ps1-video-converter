@@ -431,6 +431,12 @@ fn export_frame(
             demuxed.missing_chunks, info.chunk_count
         );
     }
+    if demuxed.bad_edc_chunks > 0 {
+        eprintln!(
+            "WARNING: frame {number}: {} of {} sectors fail their EDC check, so the picture may be damaged",
+            demuxed.bad_edc_chunks, info.chunk_count
+        );
+    }
     let planes = decode_frame(&demuxed.data, info.width, info.height, idct)
         .with_context(|| format!("decoding frame {number}"))?;
 

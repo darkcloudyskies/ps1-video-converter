@@ -17,6 +17,9 @@ pub struct DemuxedFrame {
     /// Exactly the frame's demux size. Missing chunks are left as zeros.
     pub data: Vec<u8>,
     pub missing_chunks: u16,
+    /// Sectors whose data was used even though they fail their EDC check. The
+    /// damage may still decode without an error, to a wrong picture.
+    pub bad_edc_chunks: u16,
 }
 
 /// Reassemble one frame of a video stream.
@@ -29,6 +32,7 @@ pub fn demux_frame(
     let size = (frame.demux_size as usize).min(capacity);
     let mut buf = vec![0u8; capacity];
     let mut seen = vec![false; frame.chunk_count as usize];
+    let mut bad_edc_chunks = 0;
 
     for s in src.read_range(frame.first_lba, frame.last_lba - frame.first_lba + 1)? {
         let channel = s.subheader().map_or(0, |sh| sh.channel);
@@ -45,11 +49,15 @@ pub fn demux_frame(
         let payload = &s.user_data()[HEADER_SIZE..HEADER_SIZE + CHUNK_DATA_SIZE];
         buf[at..at + CHUNK_DATA_SIZE].copy_from_slice(payload);
         seen[h.chunk_number as usize] = true;
+        if s.edc_ok() == Some(false) {
+            bad_edc_chunks += 1;
+        }
     }
     buf.truncate(size);
     Ok(DemuxedFrame {
         data: buf,
         missing_chunks: seen.iter().filter(|&&s| !s).count() as u16,
+        bad_edc_chunks,
     })
 }
 
@@ -217,6 +225,25 @@ mod tests {
         assert!(f.data[CHUNK_DATA_SIZE..2 * CHUNK_DATA_SIZE]
             .iter()
             .all(|&b| b == 0));
+    }
+
+    #[test]
+    fn sectors_failing_their_edc_get_counted() {
+        let mut disc = MemoryDisc {
+            sectors: vec![
+                blank(0),
+                video_sector(1, 1, 0, 2, 1, 0xA0),
+                video_sector(2, 1, 1, 2, 1, 0xA1),
+            ],
+        };
+        let idx = index(&mut disc);
+        let v = &idx.video[0];
+        let f = demux_frame(&mut disc, v, &v.frames[0]).unwrap();
+        assert_eq!(f.bad_edc_chunks, 0);
+
+        disc.sectors[2].bytes[100] ^= 0xFF;
+        let f = demux_frame(&mut disc, v, &v.frames[0]).unwrap();
+        assert_eq!((f.bad_edc_chunks, f.missing_chunks), (1, 0));
     }
 
     #[test]

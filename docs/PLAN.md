@@ -11,10 +11,11 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, **
 | Phase | State |
 |---|---|
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
-| Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned and compared with jPSXdec; results and open issues in `docs/target-games.md` |
+| Step 0: confirm target-game formats | **Done**: the 3 discs in `discs/` are scanned and compared with jPSXdec, and they're the ones that matter for now. Results in `docs/target-games.md` |
 | 2. Decode MVP | **Done**: `psx-mdec` (STRv2/v3, `accurate` and `hq` IDCT), `psx-xa`, `psx-stream`, `psxvc frame` / `audio` / `frame-hashes`. Matches jPSXdec on all 3 scanned discs: see `docs/target-games.md` |
-| 3. Export | **In progress**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, `--audio` (FLAC, Opus, AAC) and `--cfr`, checked on all 3 scanned discs. `h264` plays well in the Windows default player. Still open: retrying AV1 seeking, and optionally other players and a closer listen to the lossy audio. See `docs/export-notes.md` |
-| 4–6 | Not started |
+| 3. Export | **Done**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, `--audio` (FLAC, Opus, AAC) and `--cfr`, checked on all 3 scanned discs. `h264` plays well and `av1` seeks acceptably in the Windows default player. Optional: other players and a closer listen to the lossy audio. See `docs/export-notes.md` |
+| 4. Coverage | **Done for the 3 discs**: STRv1 decodes (tested on synthetic streams only, since no scanned disc uses it). Broken frames are decided: skipped with a warning, see `docs/export-notes.md`. Sectors that fail their EDC check now draw a warning. Out of scope for now: `/MOVIE/ENDING.MCF` on Koudelka Disc 4, the other 5 discs and the other formats in the roadmap |
+| 5–6 | Not started |
 
 Keep this table up to date as phases land.
 
@@ -36,7 +37,7 @@ Keep this table up to date as phases land.
 crates/
   psx-disc/     sector reading: BIN/CUE parser, raw 2352-byte Mode2 Form1/Form2, subheaders, EDC/ECC check
   psx-index/    scan disc → find ISO9660 files + raw streams; identify video/audio/TIM; serialize index (JSON)
-  psx-mdec/     bitstream decoders (STRv2, STRv3, Iki, …) → MDEC codes → IDCT (accurate | hq) → YCbCr planes
+  psx-mdec/     bitstream decoders (STRv1, STRv2, STRv3, Iki, …) → MDEC codes → IDCT (accurate | hq) → YCbCr planes
   psx-xa/       XA ADPCM (+ SPU ADPCM) decoder, interleave/channel demux
   psx-stream/   demux interleaved sectors → frames (multi-sector reassembly) + audio packets with sector timestamps
   psx-export/   encode/mux by piping a NUT stream to an ffmpeg process, presets, colour metadata, VFR timestamps
@@ -51,13 +52,15 @@ Key external crates: `clap`, `png` for frame dumps, `rayon` to decode frames in 
 
 ## Target games: Parasite Eve, Parasite Eve II, Koudelka
 
-These three are the first acceptance targets, and phase priority follows them.
+These three are the first acceptance targets, and phase priority follows them. For now, the owner cares mainly about the 3 discs in `discs/`: Parasite Eve Disc 1, Parasite Eve II Disc 1 and Koudelka Disc 4. The notes below on all 8 discs apply only if the others are picked up later.
 - **Step 0 (before writing decoders):** run jPSXdec's indexer (`jpsxdec -f disc.bin -x disc.idx`) on every disc of all three games: PE1 ×2, PE2 ×2, Koudelka ×4. The `.idx` lists the exact video variant, dimensions, sectors/frame and audio format of each stream, so we confirm the formats instead of guessing. Save these index summaries (metadata only, no game data) as `docs/target-games.md`.
 - I expect all three to use Sony's standard STR (v2/v3) video with XA audio, but that's unconfirmed until Step 0. If any title turns out to use a custom variant, that variant moves into phase 1.
 - Multi-disc handling: an index per disc, and output names like `PE2-D1-<file>-<stream>.mkv`.
 - These discs also serve as the gated real-disc regression set: the decode must match jPSXdec on every stream across all 8 discs.
 
 ## Format coverage roadmap
+
+Apart from STRv1 and XA 8-bit, which are done, the formats below aren't planned for now. No disc in `discs/` uses them. They stay here in case other games get picked up later.
 
 | Phase | Video | Audio |
 |---|---|---|
@@ -85,7 +88,7 @@ psxvc audio game.cue --stream 3 -o a.wav               # native-rate WAV dump
 1. **Foundations** (done): workspace, CI (fmt/clippy/test), CUE/BIN reader, sector parsing, disc indexer for STR/XA.
 2. **Decode MVP** (done): STRv2/v3 bitstream, both IDCTs, XA decoder, PNG frame dump and WAV dump.
 3. **Export**: `psx-export`, FFV1/FLAC MKV archive preset, AV1/H.264 presets, VFR timestamps, colour/SAR metadata, A/V sync. See `docs/export-notes.md`.
-4. **Coverage**: the phase 2 and 3 formats above, broken-frame handling (skip or repeat with a warning).
+4. **Coverage** (done for the 3 discs): STRv1, broken-frame handling (skip with a warning). The other phase 2 and 3 formats above are parked.
 5. **GUI**: Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue. FFmpeg ships inside the app as a Tauri sidecar, in a build trimmed to the codecs the presets need; see the licensing notes in `docs/export-notes.md`.
 6. **Optional filters**: deblock, deband, and upscaling hooks (e.g. external model via ffmpeg filter).
 
@@ -97,7 +100,7 @@ Development and testing both happen on the owner's Windows machine, with the rea
   - Build test streams with **psxavenc**, the open-source PS1 STR/XA encoder from PSn00bSDK, from frames and audio we create, e.g. ffmpeg `testsrc`, colour bars and gradients. Gradients are good at exposing banding and chroma problems. Because we know the source picture, we can measure quality (PSNR/SSIM), not only check that output matches.
   - Run **jPSXdec** (Java) as the reference decoder for the same test files.
   - Wrap the generated streams in a minimal BIN/CUE so the full disc → export pipeline gets tested.
-- **Real discs:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `tools/jpsxdec-oracle/compare.ps1` does the decode comparison, stream by stream, and `psxvc scan` summaries plus jPSXdec `.idx` files cover the index.
+- **Real discs:** the full regression run on the real discs in `discs/`. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report. Until `verify` exists, `tools/jpsxdec-oracle/compare.ps1` does the decode comparison, stream by stream, and `psxvc scan` summaries plus jPSXdec `.idx` files cover the index.
 - **Debugging clips:** `psxvc extract-sectors` cuts one stream (a few MB) into a small BIN/CUE. These contain game data, so never commit them. Keep them out of `tests/fixtures/`, where `.gitignore` allows `.bin` and `.cue` files.
 
 **Tool status:** Rust, Java 21 and FFmpeg 9 are installed. jPSXdec is a sibling checkout at `../jpsxdec`, with a built jar at `jpsxdec/_ant/release/jpsxdec.jar`. psxavenc still needs installing. `git` isn't on PATH; use the copy bundled with GitHub Desktop. Phase 3 doesn't need `clang`, `pkg-config` or FFmpeg's development files, but they're installed (with a shared FFmpeg build) in case linking is ever revisited.
