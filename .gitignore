@@ -1,0 +1,5 @@
+/target
+*.bin
+*.cue
+*.psxidx.json
+!tests/fixtures/**

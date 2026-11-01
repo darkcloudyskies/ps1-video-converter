@@ -1,0 +1,12 @@
+[package]
+name = "psx-index"
+description = "Find STR video and XA audio streams on PlayStation 1 discs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+psx-disc.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "psx-disc"
+description = "PlayStation 1 disc image access: BIN/CUE, raw CD-ROM XA sectors, EDC, ISO9660"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
