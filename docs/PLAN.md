@@ -4,7 +4,18 @@
 
 jPSXdec (Java, m35/jpsxdec) is the reference tool for pulling FMV out of PS1 discs, but its output pipeline is dated: it converts to RGB, writes AVI (MJPG/uncompressed) or image sequences, resamples audio, and duplicates frames to fake constant frame rates. This project rebuilds it in Rust with one main goal: **get the original video and audio into modern codecs and containers with as little loss as possible.**
 
-The repo `darkcloudyskies/ps1-video-converter` is empty (branch `claude/relaxed-bohr-0c1jy2`, no commits). Decisions so far: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, and **Parasite Eve, Parasite Eve II and Koudelka** as the target games, with other formats added later.
+Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, and **Parasite Eve, Parasite Eve II and Koudelka** as the target games, with other formats added later.
+
+## Status
+
+| Phase | State |
+|---|---|
+| 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
+| Step 0: confirm target-game formats | **Waiting on real-disc scans**: results go in `docs/target-games.md` |
+| 2. Decode MVP | Next |
+| 3–6 | Not started |
+
+Keep this table up to date as phases land.
 
 ## Quality principles (what we do differently from jPSXdec)
 
@@ -67,23 +78,23 @@ psxvc frame game.cue --stream 3 --frame 120 -o f.png   # quick visual check
 
 ## Phases
 
-1. **Foundations**: workspace, CI (fmt/clippy/test), CUE/BIN reader, sector parsing, disc indexer for STR/XA.
+1. **Foundations** (done): workspace, CI (fmt/clippy/test), CUE/BIN reader, sector parsing, disc indexer for STR/XA.
 2. **Decode MVP**: STRv2/v3 bitstream, both IDCTs, XA decoder, PNG frame dump and WAV dump.
 3. **Export**: libav integration, FFV1/FLAC MKV archive preset, AV1/H.264 presets, VFR timestamps, colour/SAR metadata, A/V sync.
 4. **Coverage**: the phase 2 and 3 formats above, broken-frame handling (skip or repeat with a warning).
 5. **GUI**: Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue.
 6. **Optional filters**: deblock, deband, and upscaling hooks (e.g. external model via ffmpeg filter).
 
-## Where development and testing happen (hybrid)
+## Where development and testing happen (hybrid, agreed)
 
 - **Cloud session (here):** write the code and run CI-style tests on test files that are legal to commit:
   - Build test streams with **psxavenc**, the open-source PS1 STR/XA encoder from PSn00bSDK, from frames and audio we create, e.g. ffmpeg `testsrc`, colour bars and gradients. Gradients are good at exposing banding and chroma problems. Because we know the source picture, we can measure quality (PSNR/SSIM), not only check that output matches.
   - Run **jPSXdec** (Java) in the container as the reference decoder for the same test files.
   - Wrap the generated streams in a minimal BIN/CUE so the full disc → export pipeline gets tested.
-- **Your machine:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report you can paste back.
+- **The owner's machine:** the full regression run on the 8 real discs. A `psxvc verify disc.cue --against disc.idx` command (or `cargo test` with `PSXVC_TEST_DISCS`) compares our output with jPSXdec's and writes a short text/JSON report to paste back into the development session. Until `verify` exists, `psxvc scan` summaries plus jPSXdec `.idx` files serve the same purpose.
 - **Optional, during development:**
-  - Small sector excerpts cut from your BINs with a `psxvc extract-sectors` command, one stream (a few MB) each, uploaded here only for debugging and never committed.
-  - Or connect this session to a folder on your computer through Claude Code Remote Control, so I can run the real-disc tests directly. No folders are set up yet.
+  - Small sector excerpts cut from the real BINs with `psxvc extract-sectors` (implemented), one stream (a few MB) each, uploaded here only for debugging and never committed.
+  - Or connect a cloud session to a folder on the owner's computer through Claude Code Remote Control, so real-disc tests can run directly.
 
 ## Verification
 
