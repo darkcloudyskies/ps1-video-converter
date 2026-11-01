@@ -29,6 +29,8 @@ timestamps per stream, which raw video pipes and Y4M can't.
 - **Video with `hq`:** `yuv420p10le`, tag `Y3 0B 0A` (bytes `59 33 0B 0A`).
 - **Video with `accurate`:** `yuv420p`, tag `I420`, so the console's 8-bit values go
   through unscaled.
+- **Video with the `h264` preset:** always `yuv420p`, with either IDCT. We round to
+  8 bits ourselves, so FFmpeg doesn't convert anything.
 - **Video timing:** time base 1/(sectors per second). A frame's PTS is its `last_lba`
   minus the base sector.
 - **Audio:** `pcm_s16le`, tag `PSD 0x10`, time base 1/(sample rate), one packet per
@@ -70,10 +72,42 @@ ffmpeg -y -color_range pc -f nut -i pipe:0 -map 0
 | Preset | Video | Audio | Container |
 |---|---|---|---|
 | `archive` | `-c:v ffv1 -level 3 -g 1 -slicecrc 1` | FLAC | MKV |
-| `h264` | `-c:v libx264 -crf 14` | FLAC | MP4 (or MKV with `-o x.mkv`) |
-| `av1` | `-c:v libsvtav1 -crf 20 -preset 6` | FLAC | MKV (or MP4 with `-o x.mp4`) |
+| `h264` | `-c:v libx264 -crf 14 -g 30`, always 8-bit | AAC | MP4 (or MKV with `-o x.mkv`) |
+| `av1` | `-c:v libsvtav1 -crf 20 -preset 6 -g 30` | FLAC | MKV (or MP4 with `-o x.mp4`) |
 
 MP4 output also needs `-video_track_timescale <sectors per second>`.
+
+`--audio flac|opus|aac` overrides the preset's audio, except on `archive`, which only
+allows FLAC because it's lossless. Audio options are left out for a stream with no
+audio, since FFmpeg warns about unused ones.
+
+| Audio | Arguments |
+|---|---|
+| FLAC | `-c:a flac`, at the native sample rate |
+| Opus | `-c:a libopus -b:a 128k -ar 48000` |
+| AAC | `-c:a aac -b:a 192k -ar 48000` |
+
+Opus and AAC have no 37.8 kHz mode, so they resample. The bitrates are starting
+points that nobody has judged by listening.
+
+### Constant frame rate
+
+`--cfr` adds an `fps` filter before `setparams` and keeps `-fps_mode passthrough`, so
+there's one place where frames get repeated or dropped:
+
+```text
+-vf fps=fps=<n>/<d>:start_time=0:round=near,setparams=...
+-enc_time_base:v <d>:<n>    (MP4: -video_track_timescale <n>)
+```
+
+- **Rate:** whichever of two candidates fits the frames' sectors best: a whole number
+  of sectors per frame (15 fps), or that slowed by 1000/1001 for NTSC (15000/1001). A
+  candidate fits if the frames furthest ahead of and behind its grid are at most 4
+  sectors apart. If neither does, the stream gets its exact average.
+- **`start_time=0`:** audio often starts before the first frame. The filter repeats
+  the first frame until then, so the picture stays in sync.
+- **The last frame** may be held for one extra tick, because its length isn't known.
+- **Dropped frames:** if two frames land on the same tick, the export warns.
 
 Three of these are easy to get wrong:
 
@@ -107,12 +141,70 @@ Parasite Eve Disc 1, Parasite Eve II Disc 1 and Koudelka Disc 4. See the top of
 | `yuv420p10le` or `yuv420p`, full range, BT.601, centre chroma | All 67 | Pass |
 | H.264 in MP4 and AV1 in MP4: timestamps within 0.001 ms | Shortest with audio on each disc | Pass |
 | H.264 in MP4 and AV1 in MKV: tags as above | Shortest with audio on each disc | Pass |
+| Opus in MKV and MP4: video timestamps as above, audio lag under 1 ms | Shortest with audio on each disc | Pass |
+| `--cfr` in FFV1: the right picture on every tick, FLAC unchanged | All 67 | Pass |
+| `--cfr` in MKV and MP4: evenly spaced timestamps, rate tagged in MP4 | All 67 | Pass |
+| AAC in MP4: audio lag under 1 ms | All 52 streams with both video and audio | Pass |
+
+Audio lag came out at 0 ms in all 65 measurements. It's measured by finding the shift
+that best lines up the decoded audio with the original over its loudest stretch. The test also shifts the original by one sector
+to confirm that the measurement sees the change.
+
+With `--cfr`, 46 streams came out at 15 fps, 19 at 15000/1001, and one at 30 fps. One
+Parasite Eve Disc 1 stream of 2,077 frames fell back to its exact average, 311400/20783
+(14.983 fps). No stream dropped a frame.
 
 Exporting the 36 streams of Parasite Eve II Disc 1 (19,183 frames, down to 48x32)
 took 12 s and 0.72 GB with `archive`, 17 s and 154 MB with `h264`, and 24 s and
 121 MB with `av1`, with no failures. The only warnings are from SVT-AV1 on the two
 48x32 streams, where it turns off some of its tools because the frame is so small.
-That's fast enough that decoding doesn't need `rayon` for now.
+That's fast enough that decoding doesn't need `rayon` for now. These timings predate
+the `h264` preset's move to 8-bit and AAC.
+
+### Player testing
+
+Tried in Chromium 152, the browser built into the Claude desktop app, with
+one 5.5 s Parasite Eve II stream (320x192). Each file was given 2.5 s to play, with no
+dropped frames, and the audio decoded, though nobody listened to it. All reached about
+2.45 s except H.264 10-bit, which reached 1.39 s. It was the first file loaded in its
+run, so that may be start-up time rather than decoding, and this doesn't separate them.
+
+| File (all MP4) | Result |
+|---|---|
+| H.264 8-bit and AAC, with and without `--cfr` | Plays |
+| AV1 10-bit and Opus | Plays |
+| H.264 8-bit, H.264 10-bit, AV1 10-bit, each with FLAC | Plays |
+
+On the FLAC files, a frame at 2.70 s was also compared with `psxvc frame`. The mean
+difference was under 1.5 of 255 per channel, with no overall shift, so Chromium is
+reading full range and BT.601 correctly and shows the right frame for that time.
+
+Chromium decodes these in software, so it doesn't show how hardware decoders or TVs
+would behave.
+
+The owner also tried a 2-minute Parasite Eve II stream (320x240, variable frame rate)
+in the Windows default player, thought to be the Photos app:
+
+| File | Result |
+|---|---|
+| `h264` in MP4 | Plays well |
+| `av1` with Opus in MKV | Plays, but seeking back and forth misbehaved |
+| `archive` in MKV | Black picture |
+| 12-bar luma test, tagged like `h264` | All 12 bars distinct, so the full-range tag is honoured |
+
+- **Black `archive`:** FFmpeg decodes the same file to a normal picture, so the file
+  is fine. The player probably has no FFV1 decoder, though that isn't confirmed.
+  `archive` is for preservation, so this is accepted for now.
+- **AV1 seeking:** that file had key frames up to 10.74 s apart, which is the likely
+  cause. Both lossy presets now use `-g 30`, which brings the longest gap to about 2 s
+  with little change in size. The new file hasn't been retried yet.
+
+## Why `h264` is 8-bit with AAC
+
+Chromium plays 10-bit H.264 with FLAC, so this wasn't forced by a failed test. The
+preset exists for compatibility, and as far as I know most hardware H.264 decoders
+don't handle 10-bit, and many players don't handle FLAC in MP4. Nothing here has
+tested that. Anyone who wants 10-bit or lossless audio has `av1` and `archive`.
 
 ## Decisions
 
@@ -131,15 +223,20 @@ That's fast enough that decoding doesn't need `rayon` for now.
 
 ## Still to do or decide
 
-- **`--cfr`:** in the plan's CLI but not built.
-- **Opus:** not built. It needs resampling to 48 kHz, which changes the audio timing.
 - **Not tested on real data:** 1x-speed discs, and 18.9 kHz, mono or 8-bit audio.
   None of the three scanned discs have them. Multiple audio tracks are handled in
   the code, but no scanned stream has more than one, and nothing has tested them.
-- **Player support:** nothing has been played in a real player. The `h264` preset is
-  10-bit with FLAC in MP4, which many players and most hardware decoders don't
-  handle, so as a compatibility preset it probably needs 8-bit video and AAC or
-  similar. Variable frame rate may cause trouble too.
+- **AV1 seeking:** retry it in the Windows default player now that key frames are
+  closer together.
+- **Player support:** only Chromium and the Windows default player have been tried
+  (see Player testing). Still to try, if they matter: VLC or mpv, and a TV, phone or
+  other hardware decoder, which may struggle with full-range H.264 or variable frame
+  rate. A device that ignores the full-range tag treats 16 as black and 235 as white, so
+  shadows and highlights get crushed and the picture looks too contrasty, not washed
+  out. To check, play a clip of bars with luma 0, 6, 12, 18, 24, 30 and 225, 231, 237,
+  243, 249, 255, tagged like the `h264` preset: if all 12 are distinct, the tag is
+  honoured. If not, the fix is converting to limited range for that preset.
+- **Listening:** nobody has judged the Opus and AAC bitrates by ear.
 - **AV1 in MP4:** AV1 has no way to express centre chroma, so only MKV holds that tag.
 
 ## Licensing, for distribution

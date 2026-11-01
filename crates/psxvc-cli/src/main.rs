@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use psx_disc::{BinCueDisc, SectorSource};
-use psx_export::{export_stream, ffmpeg, ExportOptions, Preset};
+use psx_export::{export_stream, ffmpeg, AudioCodec, ExportOptions, Preset};
 use psx_index::{scan, AudioStream, DiscIndex, ScanOptions, VideoStream};
 use psx_mdec::{decode_coefficients, decode_frame, reconstruct, Idct};
 use psx_stream::{demux_frame, for_each_audio_sector};
@@ -69,6 +69,14 @@ enum Cmd {
         /// Sample aspect ratio to tag the video with, as `W:H`.
         #[arg(long, default_value = "1:1")]
         sar: String,
+        /// Audio codec (default: AAC for `h264`, otherwise FLAC). Opus and AAC
+        /// resample to 48 kHz. The `archive` preset only allows FLAC.
+        #[arg(long, value_enum)]
+        audio: Option<AudioArg>,
+        /// Write constant frame rate video instead of each frame's exact time,
+        /// repeating or dropping frames where the timing needs it.
+        #[arg(long)]
+        cfr: bool,
         /// The FFmpeg to run (default: beside `psxvc`, then PATH).
         #[arg(long)]
         ffmpeg: Option<PathBuf>,
@@ -141,10 +149,27 @@ enum IdctArg {
 enum PresetArg {
     /// Lossless FFV1 and FLAC in MKV.
     Archive,
-    /// H.264 and FLAC in MP4 (or MKV, going by the output's extension).
+    /// 8-bit H.264 and AAC in MP4 (or MKV, going by the output's extension).
     H264,
     /// AV1 and FLAC in MKV (or MP4, going by the output's extension).
     Av1,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AudioArg {
+    Flac,
+    Opus,
+    Aac,
+}
+
+impl From<AudioArg> for AudioCodec {
+    fn from(a: AudioArg) -> AudioCodec {
+        match a {
+            AudioArg::Flac => AudioCodec::Flac,
+            AudioArg::Opus => AudioCodec::Opus,
+            AudioArg::Aac => AudioCodec::Aac,
+        }
+    }
 }
 
 impl From<PresetArg> for Preset {
@@ -214,6 +239,8 @@ fn main() -> Result<()> {
             preset,
             idct,
             sar,
+            audio,
+            cfr,
             ffmpeg,
             index,
             output,
@@ -223,6 +250,8 @@ fn main() -> Result<()> {
                 preset: preset.into(),
                 idct: idct.into(),
                 sar: parse_sar(&sar)?,
+                audio: audio.map(Into::into),
+                cfr,
                 ffmpeg: ffmpeg::locate(ffmpeg.as_deref()),
             };
             let idx = load_or_scan(&disc, index)?;
@@ -336,6 +365,12 @@ fn export_one(
     let report = report.with_context(|| format!("exporting video stream {}", v.id))?;
     for w in &report.warnings {
         eprintln!("WARNING: stream {}: {w}", v.id);
+    }
+    if let Some((n, d)) = report.constant_rate {
+        println!(
+            "Constant frame rate: {:.3} fps ({n}/{d})",
+            n as f64 / d as f64
+        );
     }
     println!(
         "Wrote {} of {} frames and {} audio sectors to {}",

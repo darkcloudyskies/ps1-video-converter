@@ -225,6 +225,24 @@ fn export_writes_a_file_and_names_it_after_the_stream() {
     assert!(out.contains("1 of 1 frames"), "{out}");
     assert!(named.exists());
 
+    let cfr = dir.path().join("cfr.mkv");
+    let out = psxvc(&[
+        "export",
+        bin_s,
+        "--stream",
+        "0",
+        "--quiet",
+        "--cfr",
+        "--preset",
+        "av1",
+        "--audio",
+        "opus",
+        "-o",
+        cfr.to_str().unwrap(),
+    ]);
+    assert!(out.contains("Constant frame rate"), "{out}");
+    assert!(cfr.exists());
+
     let all = dir.path().join("all");
     psxvc(&[
         "export",
@@ -252,6 +270,8 @@ fn export_rejects_bad_arguments() {
         vec!["export", bin_s, "--stream", "9"],
         vec!["export", bin_s, "--stream", "0", "--sar", "4"],
         vec!["export", bin_s, "--stream", "0", "--sar", "0:1"],
+        vec!["export", bin_s, "--stream", "0", "--audio", "wav"],
+        vec!["export", bin_s, "--stream", "0", "--audio", "opus"],
         vec!["export", bin_s, "--stream", "0", "-o", "x.mp4"],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_psxvc"))

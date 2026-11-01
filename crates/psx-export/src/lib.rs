@@ -46,13 +46,64 @@ pub enum Preset {
     /// Lossless FFV1 and FLAC.
     #[default]
     Archive,
-    /// H.264 and FLAC.
+    /// 8-bit H.264 and AAC, for players that can't handle anything newer.
     H264,
     /// AV1 and FLAC.
     Av1,
 }
 
+/// What to encode the audio to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    /// Lossless, at the native sample rate.
+    Flac,
+    /// Lossy, resampled to 48 kHz.
+    Opus,
+    /// Lossy, resampled to 48 kHz.
+    Aac,
+}
+
+/// How samples go out to FFmpeg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    Yuv420p,
+    Yuv420p10,
+}
+
+impl PixelFormat {
+    /// `accurate` keeps the console's own 8-bit values, and `hq` needs 10 bits to
+    /// hold its extra precision, except where the preset is 8-bit whatever the IDCT.
+    pub fn for_export(preset: Preset, idct: Idct) -> Self {
+        match (preset, idct) {
+            (Preset::H264, _) | (_, Idct::Accurate) => PixelFormat::Yuv420p,
+            (_, Idct::Hq) => PixelFormat::Yuv420p10,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            PixelFormat::Yuv420p => "yuv420p",
+            PixelFormat::Yuv420p10 => "yuv420p10le",
+        }
+    }
+
+    fn fourcc(self) -> [u8; 4] {
+        match self {
+            PixelFormat::Yuv420p => *b"I420",
+            PixelFormat::Yuv420p10 => [b'Y', b'3', 11, 10],
+        }
+    }
+}
+
 impl Preset {
+    /// The audio codec to use when none is asked for.
+    pub fn default_audio(self) -> AudioCodec {
+        match self {
+            Preset::Archive | Preset::Av1 => AudioCodec::Flac,
+            Preset::H264 => AudioCodec::Aac,
+        }
+    }
+
     /// The file extension to use when the output doesn't name one.
     pub fn default_extension(self) -> &'static str {
         match self {
@@ -86,6 +137,10 @@ pub struct ExportOptions {
     pub idct: Idct,
     /// Sample aspect ratio to tag the video with.
     pub sar: (u32, u32),
+    /// The audio codec, or `None` for the preset's own.
+    pub audio: Option<AudioCodec>,
+    /// Write constant frame rate video, at the rate [`constant_rate`] picks.
+    pub cfr: bool,
     /// The program to run; see [`ffmpeg::locate`].
     pub ffmpeg: PathBuf,
 }
@@ -94,22 +149,78 @@ pub struct ExportOptions {
 pub struct ExportReport {
     pub frames_written: usize,
     pub audio_packets: u32,
+    /// The frame rate as a fraction, if the output is constant frame rate.
+    pub constant_rate: Option<(u32, u32)>,
     /// Problems that didn't stop the export, including anything FFmpeg printed.
     pub warnings: Vec<String>,
 }
 
-/// The pixel format each IDCT's output goes out in. `accurate` keeps the
-/// console's own 8-bit values, and `hq` needs 10 bits to hold its extra precision.
-fn pix_fmt(idct: Idct) -> (&'static str, [u8; 4]) {
-    match idct {
-        Idct::Accurate => ("yuv420p", *b"I420"),
-        Idct::Hq => ("yuv420p10le", [b'Y', b'3', 11, 10]),
+/// How far apart the frames furthest ahead of and behind a rate's grid may be, in
+/// sectors, for that rate to count as the stream's. Audio sectors push frames
+/// about by 1 or 2 either way.
+const CFR_MAX_SPREAD: f64 = 4.0;
+
+/// The frame rate for constant frame rate output, as `(numerator, denominator)`.
+/// Games run at a whole number of sectors per frame, or at that rate slowed by
+/// 1000/1001 for NTSC, like the 14.985 fps of Parasite Eve. A stream that fits
+/// neither gets its exact average. A single frame has no rate, so it gets 15 fps.
+pub fn constant_rate(video: &VideoStream) -> (u32, u32) {
+    let sps = video.timing.sectors_per_second as u64;
+    let frames = &video.frames;
+    let (Some(first), Some(last)) = (frames.first(), frames.last()) else {
+        return (15, 1);
+    };
+    let span = (last.last_lba - first.last_lba) as u64;
+    let intervals = frames.len() as u64 - 1;
+    if span == 0 {
+        return (15, 1);
     }
+    let whole = ((span + intervals / 2) / intervals).max(1);
+    // Sectors per frame as a fraction, for each candidate.
+    let spread = |(p, q): (u64, u64)| {
+        let (mut low, mut high) = (0i64, 0i64);
+        for (k, f) in frames.iter().enumerate() {
+            let at = (f.last_lba - first.last_lba) as i64 * q as i64 - k as i64 * p as i64;
+            low = low.min(at);
+            high = high.max(at);
+        }
+        (high - low) as f64 / q as f64
+    };
+    // On a tie the whole number wins, since it's listed first.
+    let (p, q) = [(whole, 1), (whole * 1001, 1000)]
+        .into_iter()
+        .map(|c| (c, spread(c)))
+        .filter(|&(_, s)| s <= CFR_MAX_SPREAD)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map_or((span, intervals), |(c, _)| c);
+    reduced(sps * q, p)
 }
 
-/// Append the visible part of a frame as full-range planar YCbCr, in the pixel
-/// format [`pix_fmt`] gives for `idct`.
-pub fn frame_bytes(p: &Planes, idct: Idct, out: &mut Vec<u8>) {
+fn reduced(a: u64, b: u64) -> (u32, u32) {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    ((a / x) as u32, (b / x) as u32)
+}
+
+/// How many frames constant frame rate output loses, because another frame lands
+/// on the same tick. Rounds the same way as FFmpeg's `fps` filter with `round=near`.
+fn frames_lost_to_rate(video: &VideoStream, base: u32, rate: (u32, u32)) -> usize {
+    let sps = video.timing.sectors_per_second as u64;
+    let tick = |lba: u32| {
+        let scale = sps * rate.1 as u64;
+        ((lba - base) as u64 * rate.0 as u64 + scale / 2) / scale
+    };
+    video
+        .frames
+        .windows(2)
+        .filter(|w| tick(w[0].last_lba) == tick(w[1].last_lba))
+        .count()
+}
+
+/// Append the visible part of a frame as full-range planar YCbCr.
+pub fn frame_bytes(p: &Planes, format: PixelFormat, out: &mut Vec<u8>) {
     let (w, h) = (p.width as usize, p.height as usize);
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let luma = p.y.chunks_exact(p.coded_width).take(h).map(|r| &r[..w]);
@@ -120,8 +231,8 @@ pub fn frame_bytes(p: &Planes, idct: Idct, out: &mut Vec<u8>) {
             }
         }
     };
-    match idct {
-        Idct::Accurate => {
+    match format {
+        PixelFormat::Yuv420p => {
             let put = |s: f64, out: &mut Vec<u8>| {
                 out.push((s + 128.0).round().clamp(0.0, 255.0) as u8);
             };
@@ -129,7 +240,7 @@ pub fn frame_bytes(p: &Planes, idct: Idct, out: &mut Vec<u8>) {
             chroma(&p.cb, out, &put);
             chroma(&p.cr, out, &put);
         }
-        Idct::Hq => {
+        PixelFormat::Yuv420p10 => {
             let scale = 1023.0 / 255.0;
             for &s in luma.flatten() {
                 let v = ((s + 128.0) * scale).round().clamp(0.0, 1023.0) as u16;
@@ -170,6 +281,14 @@ fn sector_pts(lba: u32, base: u32, rate: u32, sectors_per_second: u32) -> u64 {
     (lba - base) as u64 * rate as u64 / sectors_per_second as u64
 }
 
+/// How frames are decoded and sent.
+#[derive(Debug, Clone, Copy)]
+pub struct Picture {
+    pub idct: Idct,
+    pub format: PixelFormat,
+    pub sar: (u32, u32),
+}
+
 /// Decode a stream and write it to `w` as NUT, in disc order. `progress` gets the
 /// number of frames handled and the total.
 pub fn write_nut<W: Write>(
@@ -177,19 +296,17 @@ pub fn write_nut<W: Write>(
     src: &mut dyn SectorSource,
     video: &VideoStream,
     audio: &[&AudioStream],
-    idct: Idct,
-    sar: (u32, u32),
+    picture: Picture,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<(W, ExportReport)> {
     let sps = video.timing.sectors_per_second;
     let base = base_sector(video, audio);
 
-    let (_, fourcc) = pix_fmt(idct);
     let mut streams = vec![Stream::Video {
-        fourcc,
+        fourcc: picture.format.fourcc(),
         width: video.width,
         height: video.height,
-        sar,
+        sar: picture.sar,
         time_base_den: sps,
     }];
     streams.extend(audio.iter().map(|a| Stream::Audio {
@@ -244,10 +361,10 @@ pub fn write_nut<W: Write>(
                 ));
                 continue;
             }
-            match decode_visible(src, video, f, idct, &mut report)? {
+            match decode_visible(src, video, f, picture.idct, &mut report)? {
                 Some(planes) => {
                     buf.clear();
-                    frame_bytes(&planes, idct, &mut buf);
+                    frame_bytes(&planes, picture.format, &mut buf);
                     let pts = (f.last_lba - base) as u64;
                     nut.frame(0, pts, &buf)?;
                     report.frames_written += 1;
@@ -337,28 +454,33 @@ pub fn export_stream(
     progress: impl FnMut(usize, usize),
 ) -> Result<ExportReport> {
     let container = options.preset.container(output)?;
+    let audio_codec = options.audio.unwrap_or(options.preset.default_audio());
+    if options.preset == Preset::Archive && audio_codec != AudioCodec::Flac {
+        return Err(Error::Unsupported(
+            "the archive preset is lossless, so its audio has to be FLAC".into(),
+        ));
+    }
     let partial = partial_path(output);
-    let (pix_fmt, _) = pix_fmt(options.idct);
+    let format = PixelFormat::for_export(options.preset, options.idct);
+    let constant_rate = options.cfr.then(|| constant_rate(video));
     let args = ffmpeg::args(&Job {
         preset: options.preset,
+        audio: (!audio.is_empty()).then_some(audio_codec),
         sectors_per_second: video.timing.sectors_per_second,
-        pix_fmt,
+        constant_rate,
+        pix_fmt: format.name(),
         container,
         output: &partial,
     });
 
     let mut process = Process::spawn(&options.ffmpeg, &args)?;
     let stdin = BufWriter::with_capacity(PIPE_BUFFER, process.take_stdin());
-    let muxed = write_nut(
-        stdin,
-        src,
-        video,
-        audio,
-        options.idct,
-        options.sar,
-        progress,
-    )
-    .map(|(stdin, report)| {
+    let picture = Picture {
+        idct: options.idct,
+        format,
+        sar: options.sar,
+    };
+    let muxed = write_nut(stdin, src, video, audio, picture, progress).map(|(stdin, report)| {
         // Closes the pipe, which is how FFmpeg knows the stream has ended.
         drop(stdin);
         report
@@ -367,6 +489,15 @@ pub fn export_stream(
 
     let outcome = match (muxed, finished) {
         (Ok(mut report), Ok(lines)) => {
+            report.constant_rate = constant_rate;
+            if let Some(rate) = constant_rate {
+                let lost = frames_lost_to_rate(video, base_sector(video, audio), rate);
+                if lost > 0 {
+                    report.warnings.push(format!(
+                        "constant frame rate dropped {lost} frames that landed on the same tick"
+                    ));
+                }
+            }
             report.warnings.extend(lines);
             Ok(report)
         }
@@ -389,6 +520,115 @@ pub fn export_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_index::Timing;
+
+    /// A stream with frames ending at these sectors.
+    fn stream_at(lbas: &[u32], sps: u32) -> VideoStream {
+        let frames: Vec<FrameInfo> = lbas
+            .iter()
+            .enumerate()
+            .map(|(i, &last_lba)| FrameInfo {
+                number: i as u32 + 1,
+                first_lba: last_lba,
+                last_lba,
+                chunk_count: 1,
+                chunks_found: 1,
+                demux_size: 0,
+                width: 16,
+                height: 16,
+                quant_scale: 1,
+                version: 2,
+            })
+            .collect();
+        VideoStream {
+            id: 0,
+            file: None,
+            channel: 0,
+            first_lba: lbas.first().copied().unwrap_or(0),
+            last_lba: lbas.last().copied().unwrap_or(0),
+            width: 16,
+            height: 16,
+            variant: "STRv2".into(),
+            frame_count: frames.len(),
+            incomplete_frames: 0,
+            timing: Timing {
+                sectors_per_second: sps,
+                speed_source: "audio".into(),
+                fps: 0.0,
+                frame_sector_deltas: Vec::new(),
+            },
+            audio: Vec::new(),
+            frames,
+        }
+    }
+
+    #[test]
+    fn constant_rate_finds_whole_sector_rates_despite_jitter() {
+        let lbas: Vec<u32> = (0..500)
+            .map(|k| 100 + k * 10 + [0, 1, 0, 0][k as usize % 4])
+            .collect();
+        assert_eq!(constant_rate(&stream_at(&lbas, 150)), (15, 1));
+        let lbas: Vec<u32> = (0..500).map(|k| k * 5).collect();
+        assert_eq!(constant_rate(&stream_at(&lbas, 150)), (30, 1));
+        let lbas: Vec<u32> = (0..500).map(|k| k * 10).collect();
+        assert_eq!(constant_rate(&stream_at(&lbas, 75)), (15, 2));
+    }
+
+    #[test]
+    fn constant_rate_finds_the_ntsc_slowdown() {
+        // 10.01 sectors per frame, as on Parasite Eve.
+        let lbas: Vec<u32> = (0..2000).map(|k| k * 1001 / 100).collect();
+        assert_eq!(constant_rate(&stream_at(&lbas, 150)), (15000, 1001));
+    }
+
+    #[test]
+    fn constant_rate_finds_the_ntsc_slowdown_on_a_short_stream_and_through_wobble() {
+        // Too short for the slowdown to rule out 15 fps, so the better fit decides.
+        let lbas: Vec<u32> = (0..250).map(|k| k * 1001 / 100).collect();
+        assert_eq!(constant_rate(&stream_at(&lbas, 150)), (15000, 1001));
+        // A frame 2 sectors early and another 2 late, with the first on the grid.
+        let mut lbas: Vec<u32> = (0..2000).map(|k| 100 + k * 1001 / 100).collect();
+        lbas[700] -= 2;
+        lbas[1400] += 2;
+        assert_eq!(constant_rate(&stream_at(&lbas, 150)), (15000, 1001));
+    }
+
+    #[test]
+    fn constant_rate_falls_back_to_the_exact_average() {
+        // Half the stream at 10 sectors per frame, half at 20.
+        let mut lbas: Vec<u32> = (0..100).map(|k| k * 10).collect();
+        lbas.extend((0..100).map(|k| 1000 + k * 20));
+        assert_eq!(
+            constant_rate(&stream_at(&lbas, 150)),
+            reduced(150 * 199, 2980)
+        );
+    }
+
+    #[test]
+    fn constant_rate_copes_with_a_single_frame_or_none() {
+        assert_eq!(constant_rate(&stream_at(&[], 150)), (15, 1));
+        assert_eq!(constant_rate(&stream_at(&[40], 150)), (15, 1));
+    }
+
+    #[test]
+    fn frames_on_the_same_tick_count_as_lost() {
+        let even = stream_at(&[0, 10, 20, 30], 150);
+        assert_eq!(frames_lost_to_rate(&even, 0, (15, 1)), 0);
+        let bunched = stream_at(&[0, 1, 2, 30], 150);
+        assert_eq!(frames_lost_to_rate(&bunched, 0, (15, 1)), 2);
+    }
+
+    #[test]
+    fn h264_is_8_bit_whatever_the_idct() {
+        for idct in [Idct::Hq, Idct::Accurate] {
+            let f = PixelFormat::for_export(Preset::H264, idct);
+            assert_eq!(f, PixelFormat::Yuv420p);
+        }
+        let f = PixelFormat::for_export(Preset::Av1, Idct::Hq);
+        assert_eq!(f, PixelFormat::Yuv420p10);
+        let f = PixelFormat::for_export(Preset::Archive, Idct::Accurate);
+        assert_eq!(f, PixelFormat::Yuv420p);
+    }
 
     fn planes(y: f64, cb: f64, cr: f64) -> Planes {
         Planes {
@@ -405,7 +645,11 @@ mod tests {
     #[test]
     fn hq_maps_full_range_to_10_bits() {
         let mut out = Vec::new();
-        frame_bytes(&planes(-128.0, 0.0, 127.0), Idct::Hq, &mut out);
+        frame_bytes(
+            &planes(-128.0, 0.0, 127.0),
+            PixelFormat::Yuv420p10,
+            &mut out,
+        );
         let s: Vec<u16> = out
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -413,7 +657,11 @@ mod tests {
         assert_eq!(s, [0, 0, 0, 0, 512, 1021]);
 
         let mut out = Vec::new();
-        frame_bytes(&planes(127.0, -128.0, 200.0), Idct::Hq, &mut out);
+        frame_bytes(
+            &planes(127.0, -128.0, 200.0),
+            PixelFormat::Yuv420p10,
+            &mut out,
+        );
         let s: Vec<u16> = out
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -426,7 +674,7 @@ mod tests {
     #[test]
     fn accurate_stays_8_bit() {
         let mut out = Vec::new();
-        frame_bytes(&planes(-128.0, 0.0, 127.0), Idct::Accurate, &mut out);
+        frame_bytes(&planes(-128.0, 0.0, 127.0), PixelFormat::Yuv420p, &mut out);
         assert_eq!(out, [0, 0, 0, 0, 128, 255]);
     }
 
@@ -441,7 +689,7 @@ mod tests {
         p.cb[2] = 50.0;
         p.cr[2 * 8] = 50.0;
         let mut out = Vec::new();
-        frame_bytes(&p, Idct::Accurate, &mut out);
+        frame_bytes(&p, PixelFormat::Yuv420p, &mut out);
         assert_eq!(out.len(), 9 + 4 + 4);
         assert!(out.iter().all(|&s| s == 128));
     }

@@ -13,7 +13,7 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, **
 | 1. Foundations | **Done**: `psx-disc` (BIN/CUE, sectors, EDC, ISO9660), `psx-index` (STR/XA stream indexer), `psxvc scan` / `list` / `extract-sectors`, CI |
 | Step 0: confirm target-game formats | **In progress**: 3 of 8 discs scanned and compared with jPSXdec; results and open issues in `docs/target-games.md` |
 | 2. Decode MVP | **Done**: `psx-mdec` (STRv2/v3, `accurate` and `hq` IDCT), `psx-xa`, `psx-stream`, `psxvc frame` / `audio` / `frame-hashes`. Matches jPSXdec on all 3 scanned discs: see `docs/target-games.md` |
-| 3. Export | **In progress**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, checked on all 3 scanned discs. Still open: `--cfr`, Opus, player testing. See `docs/export-notes.md` |
+| 3. Export | **In progress**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, `--audio` (FLAC, Opus, AAC) and `--cfr`, checked on all 3 scanned discs. `h264` plays well in the Windows default player. Still open: retrying AV1 seeking, and optionally other players and a closer listen to the lossy audio. See `docs/export-notes.md` |
 | 4–6 | Not started |
 
 Keep this table up to date as phases land.
@@ -28,7 +28,7 @@ Keep this table up to date as phases land.
 4. **Exact timing instead of duplicated frames.** Give each frame a timestamp based on its sector position (75 sectors/s at 1×, 150 at 2×) and use a timebase like 1/150 s or 1/37800 s. Write variable frame rate output into MKV/MP4. FFmpeg's MKV writer rounds timestamps to 1 ms, so MP4 is the only one of the two that keeps them exact. A `--cfr` option can still produce constant frame rate output if needed.
 5. **Native audio.** Decode XA ADPCM to PCM at its native rate (37 800 or 18 900 Hz, mono or stereo) and store it losslessly as FLAC. Only resample when the user picks a lossy target that requires it (e.g. Opus at 48 kHz).
 6. **Pixel aspect, not scaling.** Crop to the real frame dimensions and set the SAR/DAR (usually 4:3) in the container, instead of resizing pixels.
-7. **Lossless archival first.** Default output is FFV1 (10-bit) + FLAC in MKV. Distribution presets: AV1 (SVT-AV1 10-bit) + Opus/FLAC in MKV or MP4, and x264/x265 for compatibility. Upscaling and deblocking are optional, explicit filters and never on by default.
+7. **Lossless archival first.** Default output is FFV1 (10-bit) + FLAC in MKV. Distribution presets: AV1 (SVT-AV1 10-bit) + Opus/FLAC in MKV or MP4, and 8-bit x264 + AAC for compatibility (x265 isn't built). Upscaling and deblocking are optional, explicit filters and never on by default.
 
 ## Architecture (Cargo workspace)
 
@@ -72,7 +72,7 @@ jPSXdec's source and docs (`jpsxdec/modules/*`, its PlayStation1_STR_format.txt)
 ```
 psxvc scan  game.cue              # writes game.psxidx.json, lists streams
 psxvc list  game.psxidx.json      # id, type, WxH, frames, fps, audio
-psxvc export game.cue --stream 3 --preset archive|av1|h264 [--idct accurate|hq] [--sar W:H] [--cfr, not built yet] [--ffmpeg path] [-o out.mkv]
+psxvc export game.cue --stream 3 --preset archive|av1|h264 [--idct accurate|hq] [--sar W:H] [--audio flac|opus|aac] [--cfr] [--ffmpeg path] [-o out.mkv]
 psxvc export game.cue --all --preset av1 -o out/
 psxvc frame game.cue --stream 3 --frame 120 -o f.png   # quick visual check
 psxvc audio game.cue --stream 3 -o a.wav               # native-rate WAV dump

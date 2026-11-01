@@ -1,7 +1,7 @@
 //! Running FFmpeg. Everything that knows about its command line or its process
 //! lives here, so the rest of the code doesn't depend on how it's run.
 
-use crate::{Error, Preset, Result};
+use crate::{AudioCodec, Error, Preset, Result};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,11 @@ pub fn locate(explicit: Option<&Path>) -> PathBuf {
 /// What FFmpeg needs to know about the stream and where it's going.
 pub(crate) struct Job<'a> {
     pub preset: Preset,
+    /// `None` if the stream has no audio, since FFmpeg warns about unused options.
+    pub audio: Option<AudioCodec>,
     pub sectors_per_second: u32,
+    /// The frame rate as a fraction, for constant frame rate output.
+    pub constant_rate: Option<(u32, u32)>,
     pub pix_fmt: &'static str,
     pub container: Container,
     pub output: &'a Path,
@@ -43,7 +47,8 @@ pub(crate) enum Container {
 
 /// The full command line, reading one NUT stream from stdin.
 pub(crate) fn args(job: &Job) -> Vec<OsString> {
-    let sps = job.sectors_per_second;
+    // The time base is one sector, or one frame when the rate is constant.
+    let (timescale, tick) = job.constant_rate.unwrap_or((job.sectors_per_second, 1));
     // -color_range before -i applies to the input, separately from the output's.
     let mut a: Vec<String> = [
         "-y",
@@ -65,12 +70,18 @@ pub(crate) fn args(job: &Job) -> Vec<OsString> {
     .to_vec();
     // Without this, FFmpeg rounds PTS to the encoder's guessed frame rate and
     // silently produces constant frame rate.
-    a.extend(["-enc_time_base:v".into(), format!("1:{sps}")]);
-    // Without setparams, primaries and transfer come out `unknown`.
+    a.extend(["-enc_time_base:v".into(), format!("{tick}:{timescale}")]);
+    // Without setparams, primaries and transfer come out `unknown`. The fps filter
+    // starts at zero so the picture still lines up with audio that starts first.
+    let fps = job
+        .constant_rate
+        .map(|(n, d)| format!("fps=fps={n}/{d}:start_time=0:round=near,"))
+        .unwrap_or_default();
     a.extend([
         "-vf".into(),
-        "setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=pc"
-            .into(),
+        format!(
+            "{fps}setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=pc"
+        ),
     ]);
     a.extend(
         [
@@ -91,16 +102,33 @@ pub(crate) fn args(job: &Job) -> Vec<OsString> {
     );
     let codec: &[&str] = match job.preset {
         Preset::Archive => &["-c:v", "ffv1", "-level", "3", "-g", "1", "-slicecrc", "1"],
-        Preset::H264 => &["-c:v", "libx264", "-crf", "14"],
-        Preset::Av1 => &["-c:v", "libsvtav1", "-crf", "20", "-preset", "6"],
+        // -g: a key frame every 2 s at 15 fps. The encoders' defaults leave 11 to 16 s
+        // between them, which makes seeking slow and jumpy.
+        Preset::H264 => &["-c:v", "libx264", "-crf", "14", "-g", "30"],
+        Preset::Av1 => &[
+            "-c:v",
+            "libsvtav1",
+            "-crf",
+            "20",
+            "-preset",
+            "6",
+            "-g",
+            "30",
+        ],
     };
     a.extend(codec.iter().map(|s| s.to_string()));
-    a.extend(["-c:a".into(), "flac".into()]);
+    let audio: &[&str] = match job.audio {
+        None => &[],
+        Some(AudioCodec::Flac) => &["-c:a", "flac"],
+        Some(AudioCodec::Opus) => &["-c:a", "libopus", "-b:a", "128k", "-ar", "48000"],
+        Some(AudioCodec::Aac) => &["-c:a", "aac", "-b:a", "192k", "-ar", "48000"],
+    };
+    a.extend(audio.iter().map(|s| s.to_string()));
     match job.container {
         Container::Mkv => a.extend(["-f".into(), "matroska".into()]),
         Container::Mp4 => a.extend([
             "-video_track_timescale".into(),
-            sps.to_string(),
+            timescale.to_string(),
             "-f".into(),
             "mp4".into(),
         ]),
@@ -195,6 +223,77 @@ mod tests {
             .collect()
     }
 
+    fn job(output: &str) -> Job<'_> {
+        Job {
+            preset: Preset::Archive,
+            audio: Some(AudioCodec::Flac),
+            sectors_per_second: 150,
+            constant_rate: None,
+            pix_fmt: "yuv420p10le",
+            container: Container::Mkv,
+            output: Path::new(output),
+        }
+    }
+
+    #[test]
+    fn constant_rate_sets_the_filter_and_time_base() {
+        let a = strings(&Job {
+            preset: Preset::H264,
+            constant_rate: Some((15000, 1001)),
+            container: Container::Mp4,
+            ..job("o.mp4")
+        });
+        assert_eq!(value_of(&a, "-enc_time_base:v"), Some("1001:15000"));
+        assert_eq!(value_of(&a, "-video_track_timescale"), Some("15000"));
+        assert_eq!(value_of(&a, "-fps_mode"), Some("passthrough"));
+        assert!(value_of(&a, "-vf")
+            .unwrap()
+            .starts_with("fps=fps=15000/1001:start_time=0:round=near,setparams="));
+    }
+
+    #[test]
+    fn variable_rate_has_no_fps_filter() {
+        let a = strings(&job("o.mkv"));
+        assert!(value_of(&a, "-vf").unwrap().starts_with("setparams="));
+    }
+
+    #[test]
+    fn lossy_audio_is_resampled_to_48_khz_and_flac_is_not() {
+        let a = strings(&job("o.mkv"));
+        assert_eq!(value_of(&a, "-c:a"), Some("flac"));
+        assert_eq!(value_of(&a, "-ar"), None);
+        for (audio, name) in [(AudioCodec::Opus, "libopus"), (AudioCodec::Aac, "aac")] {
+            let a = strings(&Job {
+                audio: Some(audio),
+                ..job("o.mkv")
+            });
+            assert_eq!(value_of(&a, "-c:a"), Some(name));
+            assert_eq!(value_of(&a, "-ar"), Some("48000"));
+        }
+    }
+
+    #[test]
+    fn lossy_presets_set_a_short_key_frame_interval() {
+        for preset in [Preset::H264, Preset::Av1] {
+            let a = strings(&Job {
+                preset,
+                ..job("o.mkv")
+            });
+            assert_eq!(value_of(&a, "-g"), Some("30"));
+        }
+    }
+
+    #[test]
+    fn no_audio_means_no_audio_options() {
+        let a = strings(&Job {
+            audio: None,
+            ..job("o.mkv")
+        });
+        for flag in ["-c:a", "-b:a", "-ar"] {
+            assert_eq!(value_of(&a, flag), None);
+        }
+    }
+
     fn value_of<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
         let at = a.iter().position(|x| x == flag)?;
         Some(&a[at + 1])
@@ -204,11 +303,8 @@ mod tests {
     fn time_base_follows_the_disc_speed() {
         for (sps, want) in [(75, "1:75"), (150, "1:150")] {
             let a = strings(&Job {
-                preset: Preset::Archive,
                 sectors_per_second: sps,
-                pix_fmt: "yuv420p10le",
-                container: Container::Mkv,
-                output: Path::new("o.mkv"),
+                ..job("o.mkv")
             });
             assert_eq!(value_of(&a, "-enc_time_base:v"), Some(want));
         }
@@ -218,10 +314,9 @@ mod tests {
     fn input_range_comes_before_the_input_and_output_comes_last() {
         let a = strings(&Job {
             preset: Preset::H264,
-            sectors_per_second: 150,
             pix_fmt: "yuv420p",
             container: Container::Mp4,
-            output: Path::new("o.mp4"),
+            ..job("o.mp4")
         });
         let input = a.iter().position(|x| x == "-i").unwrap();
         let range = a.iter().position(|x| x == "-color_range").unwrap();
