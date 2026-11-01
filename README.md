@@ -17,7 +17,8 @@ See [docs/PLAN.md](docs/PLAN.md) for the full design and roadmap.
 ## Status
 
 Reading the disc, finding the streams and decoding them are in place (STRv2 and
-STRv3 video, XA audio). Export to modern codecs and containers comes next.
+STRv3 video, XA audio). Export to modern codecs and containers comes next (see
+[docs/export-notes.md](docs/export-notes.md)).
 
 | Command | What it does |
 |---|---|
