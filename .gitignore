@@ -1,4 +1,6 @@
 /target
+/dist
+/crates/psxvc-gui/gen
 *.bin
 *.cue
 *.psxidx.json

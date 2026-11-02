@@ -3,8 +3,15 @@
 use crate::audio::XaFormat;
 use psx_disc::iso9660::IsoFile;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 pub const INDEX_FORMAT_VERSION: u32 = 1;
+
+/// Where a disc's index is kept by default: `<name>.psxidx.json` beside it.
+pub fn default_index_path(disc: &Path) -> PathBuf {
+    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
+    disc.with_file_name(format!("{stem}.psxidx.json"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscIndex {

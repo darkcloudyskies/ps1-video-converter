@@ -15,7 +15,8 @@ Decisions: **Rust**, **CLI first with a GUI later**, **BIN/CUE input first**, **
 | 2. Decode MVP | **Done**: `psx-mdec` (STRv2/v3, `accurate` and `hq` IDCT), `psx-xa`, `psx-stream`, `psxvc frame` / `audio` / `frame-hashes`. Matches jPSXdec on all 3 scanned discs: see `docs/target-games.md` |
 | 3. Export | **Done**: `psx-export` and `psxvc export` work, with `archive`, `h264` and `av1` presets, `--audio` (FLAC, Opus, AAC) and `--cfr`, checked on all 3 scanned discs. `h264` plays well and `av1` seeks acceptably in the Windows default player. Optional: other players and a closer listen to the lossy audio. See `docs/export-notes.md` |
 | 4. Coverage | **Done for the 3 discs**: STRv1 decodes (tested on synthetic streams only, since no scanned disc uses it). Broken frames are decided: skipped with a warning, see `docs/export-notes.md`. Sectors that fail their EDC check now draw a warning. Out of scope for now: `/MOVIE/ENDING.MCF` on Koudelka Disc 4, the other 5 discs and the other formats in the roadmap |
-| 5–6 | Not started |
+| 5. GUI | **Done for personal use**: `psxvc-gui` has the disc browser, frame scrubber, `accurate` vs `hq` comparison and batch queue, checked on all 3 scanned discs. `tools/make-portable.ps1` builds a folder holding the app and its own FFmpeg. There's no public release planned, so no trimmed FFmpeg or installer. See `docs/gui-notes.md` |
+| 6 | Not started |
 
 Keep this table up to date as phases land.
 
@@ -42,7 +43,8 @@ crates/
   psx-stream/   demux interleaved sectors → frames (multi-sector reassembly) + audio packets with sector timestamps
   psx-export/   encode/mux by piping a NUT stream to an ffmpeg process, presets, colour metadata, VFR timestamps
   psxvc-cli/    `psxvc` binary (clap)
-  (later) psxvc-gui/  Tauri app reusing the library crates
+  psxvc-app/    what the app does, with no UI toolkit: open discs, decode frames for viewing, run the export queue
+  psxvc-gui/    Tauri app: a thin layer over psxvc-app, with a plain HTML/CSS/JS page and no Node build step
 ```
 
 Key external crates: `clap`, `png` for frame dumps, `rayon` to decode frames in parallel, `serde`/`serde_json` for the index, `thiserror`/`anyhow`, `indicatif` for progress bars. CHD support (`chd` crate) can slot into `psx-disc` later behind a `SectorSource` trait.
@@ -89,7 +91,7 @@ psxvc audio game.cue --stream 3 -o a.wav               # native-rate WAV dump
 2. **Decode MVP** (done): STRv2/v3 bitstream, both IDCTs, XA decoder, PNG frame dump and WAV dump.
 3. **Export**: `psx-export`, FFV1/FLAC MKV archive preset, AV1/H.264 presets, VFR timestamps, colour/SAR metadata, A/V sync. See `docs/export-notes.md`.
 4. **Coverage** (done for the 3 discs): STRv1, broken-frame handling (skip with a warning). The other phase 2 and 3 formats above are parked.
-5. **GUI**: Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue. FFmpeg ships inside the app as a Tauri sidecar, in a build trimmed to the codecs the presets need; see the licensing notes in `docs/export-notes.md`.
+5. **GUI** (done for personal use): Tauri app with disc browser, frame scrubber, side-by-side `accurate` vs `hq` comparison, batch queue. FFmpeg sits beside the app in a portable folder. A public release would first need a build of FFmpeg trimmed to the codecs the presets need, and an installer; see the licensing notes in `docs/export-notes.md`.
 6. **Optional filters**: deblock, deband, and upscaling hooks (e.g. external model via ffmpeg filter).
 
 ## Where development and testing happen (local)

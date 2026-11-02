@@ -7,7 +7,9 @@ members = [
     "crates/psx-mdec",
     "crates/psx-stream",
     "crates/psx-xa",
+    "crates/psxvc-app",
     "crates/psxvc-cli",
+    "crates/psxvc-gui",
 ]
 
 [workspace.package]
@@ -22,6 +24,7 @@ psx-index = { path = "crates/psx-index" }
 psx-mdec = { path = "crates/psx-mdec" }
 psx-stream = { path = "crates/psx-stream" }
 psx-xa = { path = "crates/psx-xa" }
+psxvc-app = { path = "crates/psxvc-app" }
 png = "0.17"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

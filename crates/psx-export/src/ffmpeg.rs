@@ -157,16 +157,19 @@ pub(crate) struct Process {
 
 impl Process {
     pub fn spawn(program: &Path, args: &[OsString]) -> Result<Self> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| Error::FfmpegStart {
-                program: program.to_path_buf(),
-                source,
-            })?;
+            .stderr(Stdio::piped());
+        // CREATE_NO_WINDOW: a GUI program has no console, so Windows would open one.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+        let mut child = command.spawn().map_err(|source| Error::FfmpegStart {
+            program: program.to_path_buf(),
+            source,
+        })?;
         let stdin = child.stdin.take();
         let stderr = child.stderr.take().expect("stderr was piped");
         let stderr = std::thread::spawn(move || {

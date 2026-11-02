@@ -4,7 +4,7 @@ use crate::audio::XaFormat;
 use crate::model::*;
 use crate::video::StrHeader;
 use psx_disc::iso9660::{self, IsoFile};
-use psx_disc::{RawSector, Result, SectorKind, SectorSource};
+use psx_disc::{BinCueDisc, RawSector, Result, SectorKind, SectorSource};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -22,6 +22,18 @@ pub struct ScanOptions {
     pub range: Option<Range<u32>>,
     /// Name recorded in the index as its source.
     pub source_name: String,
+}
+
+impl ScanOptions {
+    /// Scan a disc's data track, which holds the filesystem and FMV.
+    pub fn for_disc(disc: &BinCueDisc, source_name: String) -> Self {
+        ScanOptions {
+            range: disc
+                .data_track()
+                .map(|t| t.start_lba..t.start_lba + t.sector_count),
+            source_name,
+        }
+    }
 }
 
 struct OpenVideo {

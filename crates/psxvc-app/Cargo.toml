@@ -1,0 +1,19 @@
+[package]
+name = "psxvc-app"
+description = "What the PS1 video converter app does, without any UI toolkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+psx-disc.workspace = true
+psx-export.workspace = true
+psx-index.workspace = true
+psx-mdec.workspace = true
+psx-stream.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

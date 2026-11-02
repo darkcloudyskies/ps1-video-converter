@@ -11,5 +11,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # The app is built on Windows below, since on Linux it would need WebKit.
+      - run: cargo clippy --workspace --exclude psxvc-gui --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude psxvc-gui
+  app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy -p psxvc-gui --all-targets -- -D warnings

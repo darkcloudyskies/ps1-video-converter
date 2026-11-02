@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use psx_disc::{BinCueDisc, SectorSource};
-use psx_export::{export_stream, ffmpeg, AudioCodec, ExportOptions, Preset};
-use psx_index::{scan, AudioStream, DiscIndex, ScanOptions, VideoStream};
+use psx_export::{default_output_name, export_stream, ffmpeg, AudioCodec, ExportOptions, Preset};
+use psx_index::{default_index_path, scan, AudioStream, DiscIndex, ScanOptions, VideoStream};
 use psx_mdec::{decode_coefficients, decode_frame, reconstruct, Idct};
 use psx_stream::{demux_frame, for_each_audio_sector};
 use psx_xa::{write_wav, XaDecoder};
@@ -260,7 +260,7 @@ fn main() -> Result<()> {
             } else {
                 let id = stream.context("give either --stream <id> or --all")?;
                 let v = video_stream(&idx, id)?;
-                let out = output.unwrap_or_else(|| default_export_name(&disc, v, options.preset));
+                let out = output.unwrap_or_else(|| default_output_name(&disc, v, options.preset));
                 export_one(&disc, &idx, v, &options, &out, quiet)?;
             }
         }
@@ -315,25 +315,6 @@ fn parse_sar(s: &str) -> Result<(u32, u32)> {
         bail!("--sar can't have a zero in it");
     }
     Ok(sar)
-}
-
-/// `<disc>-<file>-<stream>.<ext>`, e.g. `PE2 D1-FMV1-FMV016B-3.mkv`.
-fn default_export_name(disc: &Path, v: &VideoStream, preset: Preset) -> PathBuf {
-    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
-    let file = v
-        .file
-        .as_deref()
-        .map(|f| {
-            let f = f.trim_start_matches('/');
-            let f = f.rsplit_once('.').map_or(f, |(name, _)| name);
-            format!("{}-", f.replace(['/', '\\'], "-"))
-        })
-        .unwrap_or_default();
-    PathBuf::from(format!(
-        "{stem}-{file}{}.{}",
-        v.id,
-        preset.default_extension()
-    ))
 }
 
 fn export_one(
@@ -395,7 +376,7 @@ fn export_all(
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut failed = 0;
     for v in &idx.video {
-        let out = dir.join(default_export_name(disc, v, options.preset));
+        let out = dir.join(default_output_name(disc, v, options.preset));
         if let Err(e) = export_one(disc, idx, v, options, &out, quiet) {
             eprintln!("ERROR: {e:#}");
             failed += 1;
@@ -543,11 +524,6 @@ fn print_frame_hashes(disc: &Path, index: Option<PathBuf>, stream: usize) -> Res
     Ok(())
 }
 
-fn default_index_path(disc: &Path) -> PathBuf {
-    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
-    disc.with_file_name(format!("{stem}.psxidx.json"))
-}
-
 fn load_index(p: &Path) -> Result<DiscIndex> {
     let data = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
     serde_json::from_slice(&data).with_context(|| format!("parsing {}", p.display()))
@@ -555,13 +531,7 @@ fn load_index(p: &Path) -> Result<DiscIndex> {
 
 fn scan_disc(disc: &Path, quiet: bool) -> Result<DiscIndex> {
     let mut src = BinCueDisc::open(disc).with_context(|| format!("opening {}", disc.display()))?;
-    let range = src
-        .data_track()
-        .map(|t| t.start_lba..t.start_lba + t.sector_count);
-    let opts = ScanOptions {
-        range,
-        source_name: disc.display().to_string(),
-    };
+    let opts = ScanOptions::for_disc(&src, disc.display().to_string());
     let mut last_pct = u32::MAX;
     let idx = scan(&mut src, &opts, |done, total| {
         let pct = (done as u64 * 100 / total.max(1) as u64) as u32;

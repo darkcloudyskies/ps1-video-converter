@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("I/O error on {path}: {source}")]
+    #[error("I/O error on {path}")]
     Io {
         path: PathBuf,
         #[source]

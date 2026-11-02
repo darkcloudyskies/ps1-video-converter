@@ -25,7 +25,7 @@ pub enum Error {
     Disc(#[from] psx_disc::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("couldn't start {}: {source}", program.display())]
+    #[error("couldn't start {}", program.display())]
     FfmpegStart {
         program: PathBuf,
         source: std::io::Error,
@@ -451,6 +451,25 @@ fn decode_visible(
             Ok(None)
         }
     }
+}
+
+/// `<disc>-<file>-<stream>.<ext>`, e.g. `PE2 D1-FMV1-FMV016B-3.mkv`.
+pub fn default_output_name(disc: &Path, video: &VideoStream, preset: Preset) -> PathBuf {
+    let stem = disc.file_stem().unwrap_or_default().to_string_lossy();
+    let file = video
+        .file
+        .as_deref()
+        .map(|f| {
+            let f = f.trim_start_matches('/');
+            let f = f.rsplit_once('.').map_or(f, |(name, _)| name);
+            format!("{}-", f.replace(['/', '\\'], "-"))
+        })
+        .unwrap_or_default();
+    PathBuf::from(format!(
+        "{stem}-{file}{}.{}",
+        video.id,
+        preset.default_extension()
+    ))
 }
 
 /// `dir/name.mkv` to `dir/name.partial.mkv`, keeping the extension FFmpeg expects.

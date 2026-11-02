@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PS1 Video Converter</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="browser" class="panel">
+    <header class="panel-head">
+      <h1>Discs</h1>
+      <button id="open-disc" class="primary">Open disc…</button>
+    </header>
+    <select id="disc-select" aria-label="Open discs" hidden></select>
+    <p id="disc-status" class="status" role="status" hidden></p>
+    <div id="stream-tools" class="row spread" hidden>
+      <label class="check"><input id="select-all" type="checkbox"> All streams</label>
+      <span id="stream-count" class="dim"></span>
+    </div>
+    <ul id="streams" class="scroll"></ul>
+    <p id="browser-empty" class="empty">Open a <code>.cue</code> file to list its video streams. The first scan of a disc takes a little while, and the result is saved beside the disc.</p>
+  </aside>
+
+  <main id="viewer">
+    <header class="viewer-head">
+      <div class="title-block">
+        <h2 id="stream-title">No stream selected</h2>
+        <p id="stream-detail" class="dim"></p>
+      </div>
+      <div class="segmented" role="group" aria-label="What to show">
+        <button data-view="hq" aria-pressed="true">HQ</button>
+        <button data-view="accurate" aria-pressed="false">Accurate</button>
+        <button data-view="compare" aria-pressed="false">Compare</button>
+      </div>
+    </header>
+
+    <div id="stage">
+      <figure id="pane-a" class="pane"><canvas></canvas><figcaption></figcaption></figure>
+      <figure id="pane-b" class="pane" hidden><canvas></canvas><figcaption></figcaption></figure>
+      <figure id="pane-diff" class="pane" hidden><canvas></canvas><figcaption></figcaption></figure>
+    </div>
+    <p id="frame-problem" class="problem" role="alert" hidden></p>
+
+    <footer class="scrubber">
+      <button id="prev-frame" title="Previous frame (left arrow)" aria-label="Previous frame" disabled>‹</button>
+      <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Frame" disabled>
+      <button id="next-frame" title="Next frame (right arrow)" aria-label="Next frame" disabled>›</button>
+      <output id="frame-label" class="numbers"></output>
+    </footer>
+  </main>
+
+  <aside id="export" class="panel">
+    <header class="panel-head"><h1>Export</h1></header>
+    <form id="settings">
+      <label>Preset
+        <select id="preset">
+          <option value="h264">H.264 + AAC (MP4)</option>
+          <option value="av1">AV1 + FLAC (MKV)</option>
+          <option value="archive">Archive: FFV1 + FLAC (MKV)</option>
+        </select>
+      </label>
+      <p id="preset-hint" class="dim hint"></p>
+      <div class="row">
+        <label class="grow">IDCT
+          <select id="idct">
+            <option value="hq">HQ</option>
+            <option value="accurate">Accurate</option>
+          </select>
+        </label>
+        <label class="grow">Audio
+          <select id="audio"></select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="grow">Pixel aspect
+          <span class="row tight">
+            <input id="sar-w" type="number" min="1" value="1" aria-label="Pixel aspect width">
+            <span>:</span>
+            <input id="sar-h" type="number" min="1" value="1" aria-label="Pixel aspect height">
+          </span>
+        </label>
+        <label class="check bottom"><input id="cfr" type="checkbox"> Constant frame rate</label>
+      </div>
+      <label>Output folder
+        <span class="row tight">
+          <input id="folder" type="text" readonly placeholder="Choose a folder">
+          <button id="choose-folder" type="button">Choose…</button>
+        </span>
+      </label>
+      <button id="add" class="primary wide" type="submit" disabled>Add to queue</button>
+      <p id="settings-problem" class="problem" role="alert" hidden></p>
+    </form>
+
+    <div class="row spread queue-head">
+      <h1>Queue</h1>
+      <button id="clear-finished" disabled>Clear finished</button>
+    </div>
+    <ul id="queue" class="scroll"></ul>
+    <p id="queue-empty" class="empty">Exports run one at a time. A failed export doesn't stop the rest.</p>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>

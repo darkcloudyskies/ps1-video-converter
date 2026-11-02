@@ -1,0 +1,19 @@
+[package]
+name = "psxvc-gui"
+description = "PlayStation 1 FMV converter (desktop app)"
+version.workspace = true
+edition.workspace = true
+# Tauri needs this, and nothing else in the workspace does.
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+psx-export.workspace = true
+psx-mdec.workspace = true
+psxvc-app.workspace = true
+serde.workspace = true
+# custom-protocol: serve the UI from inside the program, since there's no dev server.
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-dialog = "2"
